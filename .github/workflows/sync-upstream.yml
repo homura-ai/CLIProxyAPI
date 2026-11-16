@@ -1,0 +1,122 @@
+name: sync-upstream
+
+# Rebases the patch branch onto each new upstream CLIProxyAPI release, tests it,
+# and publishes a patched linux-amd64 release (tag v<upstream>-mp.<n>).
+# On a rebase conflict or test failure it opens an issue and publishes nothing.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: router-for-me/CLIProxyAPI
+  PATCH_BRANCH: model-priority
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.PATCH_BRANCH }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Rebase onto latest upstream release
+        id: rebase
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --quiet upstream --tags --force
+          latest="$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)"
+          base="$(git describe --tags --abbrev=0 --exclude '*-mp.*' HEAD)"
+          echo "latest=$latest base=$base"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [[ "$base" != "$latest" ]]; then
+            if ! git rebase --onto "$latest" "$base" HEAD; then
+              git rebase --abort || true
+              echo "conflict=true" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            git checkout -B "$PATCH_BRANCH"
+            echo "rebased=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          bash .github/scripts/refresh-model-catalogs.sh
+          go vet ./sdk/cliproxy/auth/...
+          go test ./...
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.rebased == 'true'
+        run: git push --force-with-lease origin "HEAD:${PATCH_BRANCH}"
+
+      - name: Build and release
+        run: |
+          set -euo pipefail
+          latest='${{ steps.rebase.outputs.latest }}'
+          head="$(git rev-parse HEAD)"
+          for t in $(git tag --points-at "$head" --list "${latest}-mp.*"); do
+            echo "HEAD already released as $t"; exit 0
+          done
+          n=1
+          while git rev-parse -q --verify "refs/tags/${latest}-mp.${n}" >/dev/null; do n=$((n+1)); done
+          tag="${latest}-mp.${n}"
+          version="${tag#v}"
+          commit="$(git rev-parse --short HEAD)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          dir="dist/archive"; mkdir -p "$dir"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
+            -ldflags="-s -w -X main.Version=${version} -X main.Commit=${commit} -X main.BuildDate=${build_date}" \
+            -o "$dir/cli-proxy-api" ./cmd/server/
+          "$dir/cli-proxy-api" -h 2>&1 | grep -F "Version: ${version}"
+          cp LICENSE README.md config.example.yaml "$dir/"
+          asset="CLIProxyAPI_${version}_linux_amd64.tar.gz"
+          tar -C "$dir" -czf "dist/$asset" cli-proxy-api LICENSE README.md config.example.yaml
+          (cd dist && sha256sum "$asset" > checksums.txt)
+          git tag "$tag" "$head"
+          git push origin "refs/tags/$tag"
+          gh release create "$tag" "dist/$asset" dist/checksums.txt --target "$head" --title "$tag" \
+            --notes "Upstream ${latest} plus the per-model priority patch (branch ${PATCH_BRANCH} at ${commit})."
+
+      - name: Report failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          latest='${{ steps.rebase.outputs.latest }}'
+          title="sync-upstream failed for ${latest:-unknown upstream release}"
+          if [[ '${{ steps.rebase.outputs.conflict }}' == 'true' ]]; then
+            why="The patch branch does not rebase cleanly onto ${latest}. Rebase \`${PATCH_BRANCH}\` by hand and push; the next run releases it."
+          else
+            why="Tests, build or release failed. See the run log."
+          fi
+          existing="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          body="${why}
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

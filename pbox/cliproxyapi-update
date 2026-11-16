@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Install the newest patched CLIProxyAPI release from the fork on pbox.
+# Runs hourly from cliproxyapi-update.timer. Installs only when both proxies
+# have no open client connections, or when an update has waited over 24 hours.
+# After restarting both proxies it checks they are running and listening, and
+# restores the previous binary if not. Never sends a request to either proxy.
+set -euo pipefail
+
+REPO="${CPA_UPDATE_REPO:-01-1/CLIProxyAPI}"
+APP_DIR="${CPA_APP_DIR:-$HOME/.cli-proxy-api/app}"
+BIN="$APP_DIR/cli-proxy-api"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cliproxyapi-update"
+UNITS=(cliproxyapi.service cliproxyapi-claude.service)
+PORTS=(8317 8318)
+FORCE_AFTER_SECONDS=$((24 * 3600))
+FORCE=0
+[[ "${1:-}" == "--force" ]] && FORCE=1
+
+log() { printf '%s\n' "$*"; }
+mkdir -p "$STATE_DIR"
+
+installed="$("$BIN" -h 2>&1 | sed -n 's/^CLIProxyAPI Version: \([^,]*\),.*/\1/p' | head -1)"
+tag="$(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases --limit 20 \
+        --json tagName,createdAt --jq '[.[] | select(.tagName | test("-mp\\.[0-9]+$"))] | sort_by(.createdAt) | last | .tagName // empty')"
+if [[ -z "$tag" ]]; then log "no patched release found in $REPO"; exit 0; fi
+version="${tag#v}"
+if [[ "$installed" == "$version" ]]; then
+  rm -f "$STATE_DIR/pending"
+  log "up to date: $installed"; exit 0
+fi
+if [[ -f "$STATE_DIR/bad-version" && "$(cat "$STATE_DIR/bad-version")" == "$version" && $FORCE == 0 ]]; then
+  log "$version failed its health check before; skipping (rerun with --force to retry)"; exit 0
+fi
+
+# Wait for idle proxies, but not forever.
+now="$(date +%s)"
+if [[ ! -f "$STATE_DIR/pending" ]] || [[ "$(cut -d' ' -f1 "$STATE_DIR/pending")" != "$version" ]]; then
+  echo "$version $now" > "$STATE_DIR/pending"
+fi
+since="$(cut -d' ' -f2 "$STATE_DIR/pending")"
+busy=0
+for p in "${PORTS[@]}"; do
+  n="$(ss -Htn state established "( sport = :$p )" | wc -l)"
+  (( n > 0 )) && busy=1 && log "port $p has $n open client connections"
+done
+if (( busy && !FORCE && now - since < FORCE_AFTER_SECONDS )); then
+  log "update $installed -> $version waiting for idle proxies"; exit 0
+fi
+
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+asset="CLIProxyAPI_${version}_linux_amd64.tar.gz"
+gh release download "$tag" --repo "$REPO" --pattern "$asset" --pattern checksums.txt --dir "$work"
+(cd "$work" && grep -F " $asset" checksums.txt | sha256sum -c -)
+mkdir "$work/x" && tar -C "$work/x" -xzf "$work/$asset" cli-proxy-api
+"$work/x/cli-proxy-api" -h 2>&1 | grep -qF "Version: $version"
+
+install -m 755 "$BIN" "$BIN.prev"
+install -m 755 "$work/x/cli-proxy-api" "$BIN.new"
+mv -f "$BIN.new" "$BIN"
+log "installed $version (previous $installed kept at $BIN.prev)"
+
+healthy() {
+  sleep 8
+  for u in "${UNITS[@]}"; do systemctl --user is-active --quiet "$u" || { log "$u not active"; return 1; }; done
+  for p in "${PORTS[@]}"; do ss -Hltn "( sport = :$p )" | grep -q . || { log "nothing listening on $p"; return 1; }; done
+}
+systemctl --user restart "${UNITS[@]}"
+if healthy; then
+  rm -f "$STATE_DIR/pending"
+  log "proxies healthy on $version"
+else
+  log "rolling back to $installed"
+  install -m 755 "$BIN.prev" "$BIN.new" && mv -f "$BIN.new" "$BIN"
+  systemctl --user restart "${UNITS[@]}"
+  echo "$version" > "$STATE_DIR/bad-version"
+  if healthy; then rb="rollback to $installed healthy"; else rb="rollback to $installed ALSO unhealthy"; fi
+  log "$rb"
+  gh issue create --repo "$REPO" --title "pbox: $tag failed its health check" \
+    --body "pbox installed $tag, the proxies did not come back, and it rolled back ($rb). See \`journalctl --user -u cliproxyapi-update\` on pbox." || true
+  exit 1
+fi
