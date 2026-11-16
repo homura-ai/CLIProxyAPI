@@ -181,6 +181,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, fmt.Errorf("register auth: %w", errWeight)
 	}
+	if errModelPriority := ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return nil, fmt.Errorf("register auth: %w", errModelPriority)
+	}
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
@@ -417,6 +420,9 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	NormalizeCredentialMetadata(auth.Metadata)
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, false, fmt.Errorf("update auth: %w", errWeight)
+	}
+	if errModelPriority := ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return nil, false, false, false, fmt.Errorf("update auth: %w", errModelPriority)
 	}
 	isFileSnapshot := mode == updateModeReplace && auth.HasFileSnapshot()
 	if isFileSnapshot {
@@ -987,6 +993,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 			continue
 		}
+		if errModelPriority := ValidateAuthModelPriority(auth); errModelPriority != nil {
+			continue
+		}
 		auth.EnsureIndex()
 		_ = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false)
 		seedInitialForceCooldownDeadlines(auth)
@@ -1062,6 +1071,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
+	}
+	if errModelPriority := ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return fmt.Errorf("persist auth: %w", errModelPriority)
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil
