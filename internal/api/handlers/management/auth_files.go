@@ -423,8 +423,8 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
 		if data, errRead := os.ReadFile(full); errRead == nil {
-			var fieldBuf [7]ojson.Result
-			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets")
+			var fieldBuf [8]ojson.Result
+			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets", coreauth.MetadataModelPriority)
 			typeValue := strings.Clone(fields[0].String())
 			emailValue := strings.Clone(fields[1].String())
 			fileData["type"] = typeValue
@@ -440,6 +440,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
 						fileData["priority"] = parsed
 					}
+				}
+			}
+			if c.GetBool(ConfigV8ContextKey) && fields[7].Exists() {
+				if priorities, errPriority := coreauth.ParseModelPriority(fields[7].Value()); errPriority == nil {
+					fileData[coreauth.MetadataModelPriority] = priorities
 				}
 			}
 			if wv := fields[4]; wv.Exists() {
@@ -779,6 +784,13 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 				if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 					entry["priority"] = parsed
 				}
+			}
+		}
+	}
+	if quota.v8 {
+		if raw, exists := auth.Metadata[coreauth.MetadataModelPriority]; exists {
+			if priorities, errPriority := coreauth.ParseModelPriority(raw); errPriority == nil {
+				entry[coreauth.MetadataModelPriority] = priorities
 			}
 		}
 	}

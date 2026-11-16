@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +65,6 @@ type providerScheduler struct {
 type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
-	priority          int
 	weight            int64
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
@@ -83,6 +83,7 @@ type modelScheduler struct {
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
 type scheduledAuth struct {
 	meta        *scheduledAuthMeta
+	priority    int
 	auth        *Auth
 	state       scheduledState
 	nextRetryAt time.Time
@@ -628,7 +629,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			pinnedPredicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, true)
 			return nil, "", shard.unavailableErrorLocked("mixed", model, pinnedPredicate)
 		}
-		bestPriority, hasCandidate = pinned.meta.priority, true
+		bestPriority, hasCandidate = pinned.priority, true
 	}
 	if !hasCandidate {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
@@ -1118,9 +1119,10 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
 
-	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
+	priorityChanged := existingMeta != nil && !reflect.DeepEqual(existingMeta.auth.Metadata[MetadataModelPriority], auth.Metadata[MetadataModelPriority])
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || priorityChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
-		// or when credential-level availability transitioned.
+		// when credential-level availability transitions, or when priorities change.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)
@@ -1193,7 +1195,6 @@ func buildScheduledAuthMetaWithModelSet(auth *Auth, modelSet map[string]struct{}
 	return &scheduledAuthMeta{
 		auth:              clonedAuth,
 		providerKey:       providerKey,
-		priority:          authPriority(auth),
 		weight:            authWeight(auth),
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: modelSet,
@@ -1353,11 +1354,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousPriority := 0
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
-		previousPriority = entry.meta.priority
+		previousPriority = entry.priority
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
 	entry.meta = meta
+	entry.priority = authPriorityForModel(meta.auth, rewriteModelForAuth(m.modelKey, meta.auth))
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
@@ -1374,7 +1376,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == entry.priority && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -1762,7 +1764,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		switch entry.state {
 		case scheduledStateReady:
-			priority := entry.meta.priority
+			priority := entry.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
