@@ -89,7 +89,9 @@ jobs:
           go vet ./sdk/cliproxy/auth/...
           # Gate: no test may fail on the patched branch unless it also fails on
           # the unmodified upstream release. A failure must repeat to count (flakes).
-          fails() { go test -count=1 -json "$@" 2>/dev/null | jq -r 'select(.Action=="fail") | .Package+" "+(.Test // "")' | sort -u || true; }
+          fails() { go test -count=1 -json "$@" 2>/dev/null | jq -r 'select(.Action=="fail") | .Package+" "+(.Test // "")' | sort -u | dropexplained || true; }
+          # A package-level fail is noise when a test in that package also failed.
+          dropexplained() { awk '{l[NR]=$0; if ($2 != "") t[$1]=1} END {for (i=1; i<=NR; i++) {split(l[i], f, " "); if (f[2] != "" || !t[f[1]]) print l[i]}}'; }
           first="$(fails ./...)"
           [[ -z "$first" ]] && { echo "all tests pass"; exit 0; }
           pkgs="$(cut -d' ' -f1 <<<"$first" | sort -u)"
@@ -103,6 +105,7 @@ jobs:
           [[ -z "$new" ]] || { echo "::error::failures not present upstream:"; echo "$new"; exit 1; }
 
       - name: Push rebased branch
+        id: push
         if: steps.rebase.outputs.rebased == 'true'
         run: git push --force-with-lease origin "HEAD:${PATCH_BRANCH}"
 
@@ -152,6 +155,9 @@ jobs:
           set -euo pipefail
           latest='${{ steps.rebase.outputs.latest }}'
           title="sync-upstream failed for ${latest:-unknown upstream release}"
+          # Record the SHA that origin/${PATCH_BRANCH} now holds: the rebased one once pushed.
+          head='${{ steps.rebase.outputs.head }}'
+          [[ '${{ steps.push.outcome }}' == 'success' ]] && head="$(git rev-parse HEAD)"
           if [[ '${{ steps.rebase.outputs.conflict }}' == 'true' ]]; then
             why="The patch branch does not rebase cleanly onto ${latest}. The pbox auto-rebase agent picks this up; a fixed push to \`${PATCH_BRANCH}\` is released by the next hourly run."
           else
@@ -160,7 +166,7 @@ jobs:
           existing="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
           body="${why}
 
-          head=${{ steps.rebase.outputs.head }}
+          head=${head}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [[ -n "$existing" ]]; then
             gh issue comment "$existing" --body "$body"
