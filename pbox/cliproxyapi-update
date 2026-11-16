@@ -64,16 +64,14 @@ healthy() {
   for u in "${UNITS[@]}"; do systemctl --user is-active --quiet "$u" || { log "$u not active"; return 1; }; done
   for p in "${PORTS[@]}"; do ss -Hltn "( sport = :$p )" | grep -q . || { log "nothing listening on $p"; return 1; }; done
 }
-systemctl --user restart "${UNITS[@]}"
-if healthy; then
+if systemctl --user restart "${UNITS[@]}" && healthy; then
   rm -f "$STATE_DIR/pending"
   log "proxies healthy on $version"
 else
   log "rolling back to $installed"
-  install -m 755 "$BIN.prev" "$BIN.new" && mv -f "$BIN.new" "$BIN"
-  systemctl --user restart "${UNITS[@]}"
   echo "$version" > "$STATE_DIR/bad-version"
-  if healthy; then rb="rollback to $installed healthy"; else rb="rollback to $installed ALSO unhealthy"; fi
+  install -m 755 "$BIN.prev" "$BIN.new" && mv -f "$BIN.new" "$BIN" || log "restoring $BIN.prev failed"
+  if systemctl --user restart "${UNITS[@]}" && healthy; then rb="rollback to $installed healthy"; else rb="rollback to $installed ALSO unhealthy"; fi
   log "$rb"
   gh issue create --repo "$REPO" --title "pbox: $tag failed its health check" \
     --body "pbox installed $tag, the proxies did not come back, and it rolled back ($rb). See \`journalctl --user -u cliproxyapi-update\` on pbox." || true

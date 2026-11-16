@@ -78,13 +78,19 @@ jobs:
           set -euo pipefail
           latest='${{ steps.rebase.outputs.latest }}'
           head="$(git rev-parse HEAD)"
-          for t in $(git tag --points-at "$head" --list "${latest}-mp.*"); do
-            echo "HEAD already released as $t"; exit 0
-          done
-          n=1
-          while git rev-parse -q --verify "refs/tags/${latest}-mp.${n}" >/dev/null; do n=$((n+1)); done
-          tag="${latest}-mp.${n}"
+          # Reuse a tag already on HEAD (a previous run may have failed mid-release).
+          tag="$(git tag --points-at "$head" --list "${latest}-mp.*" | sort -V | tail -1)"
+          if [[ -z "$tag" ]]; then
+            n=1
+            while git rev-parse -q --verify "refs/tags/${latest}-mp.${n}" >/dev/null; do n=$((n+1)); done
+            tag="${latest}-mp.${n}"
+          fi
           version="${tag#v}"
+          asset="CLIProxyAPI_${version}_linux_amd64.tar.gz"
+          have="$(gh release view "$tag" --json assets --jq '[.assets[].name] | join(" ")' 2>/dev/null || true)"
+          if [[ " $have " == *" $asset "* && " $have " == *" checksums.txt "* ]]; then
+            echo "HEAD already released as $tag"; exit 0
+          fi
           commit="$(git rev-parse --short HEAD)"
           build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           dir="dist/archive"; mkdir -p "$dir"
@@ -93,12 +99,17 @@ jobs:
             -o "$dir/cli-proxy-api" ./cmd/server/
           "$dir/cli-proxy-api" -h 2>&1 | grep -F "Version: ${version}"
           cp LICENSE README.md config.example.yaml "$dir/"
-          asset="CLIProxyAPI_${version}_linux_amd64.tar.gz"
           tar -C "$dir" -czf "dist/$asset" cli-proxy-api LICENSE README.md config.example.yaml
           (cd dist && sha256sum "$asset" > checksums.txt)
-          git tag "$tag" "$head"
-          git push origin "refs/tags/$tag"
-          gh release create "$tag" "dist/$asset" dist/checksums.txt --target "$head" --title "$tag" \
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "dist/$asset" dist/checksums.txt --clobber
+            exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git tag "$tag" "$head"
+            git push origin "refs/tags/$tag"
+          fi
+          gh release create "$tag" "dist/$asset" dist/checksums.txt --verify-tag --title "$tag" \
             --notes "Upstream ${latest} plus the per-model priority patch (branch ${PATCH_BRANCH} at ${commit})."
 
       - name: Report failure
