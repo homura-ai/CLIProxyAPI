@@ -8,10 +8,26 @@ import (
 // AttributeFilePriority marks priority values inherited from a physical auth file.
 const AttributeFilePriority = "file_priority"
 
-// ApplyAuthPriorityMetadata copies a valid file priority into an auth's metadata and routing attributes.
+// AttributeFileModelPriority marks overrides inherited from a physical auth file.
+const AttributeFileModelPriority = "file_model_priority"
+
+// ApplyAuthPriorityMetadata copies valid file priorities into credential metadata and routing attributes.
 func ApplyAuthPriorityMetadata(auth *Auth, metadata map[string]any) {
 	if auth == nil {
 		return
+	}
+	delete(auth.Attributes, AttributeFileModelPriority)
+	if raw, exists := metadata[MetadataModelPriority]; exists {
+		if _, errParse := ParseModelPriority(raw); errParse == nil {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata[MetadataModelPriority] = raw
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes[AttributeFileModelPriority] = "true"
+		}
 	}
 	delete(auth.Attributes, AttributeFilePriority)
 	rawPriority, ok := metadata["priority"]

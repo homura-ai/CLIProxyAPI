@@ -431,6 +431,9 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 		return "", fmt.Errorf("auth filestore: %w", errWeight)
 	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return "", fmt.Errorf("auth filestore: %w", errModelPriority)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -732,6 +735,9 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	cliproxyauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, errWeight
+	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(&cliproxyauth.Auth{Metadata: metadata}); errModelPriority != nil {
+		return nil, errModelPriority
 	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {

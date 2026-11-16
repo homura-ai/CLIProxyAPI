@@ -403,7 +403,28 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 			targetAuth.Metadata = make(map[string]any)
 		}
 
-		if fieldPath == coreauth.AttributeWeight {
+		if fieldPath == coreauth.MetadataModelPriority {
+			if value == nil {
+				delete(targetAuth.Metadata, coreauth.MetadataModelPriority)
+				delete(targetAuth.Attributes, coreauth.AttributeFileModelPriority)
+			} else {
+				priorities, errPriority := coreauth.ParseModelPriority(value)
+				if errPriority != nil {
+					return &authFileFieldPatchError{message: errPriority.Error()}
+				}
+				// Keep a JSON-compatible map so auth snapshots deep-copy the rules.
+				rules := make(map[string]any, len(priorities))
+				for pattern, priority := range priorities {
+					rules[pattern] = priority
+				}
+				targetAuth.Metadata[coreauth.MetadataModelPriority] = rules
+				if targetAuth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile {
+					targetAuth.Attributes[coreauth.AttributeFileModelPriority] = "true"
+				}
+			}
+		} else if rootAuthFileField(fieldPath) == coreauth.MetadataModelPriority {
+			return &authFileFieldPatchError{message: "model_priority does not support nested fields; replace the object"}
+		} else if fieldPath == coreauth.AttributeWeight {
 			if value == nil {
 				delete(targetAuth.Metadata, coreauth.AttributeWeight)
 			} else {
