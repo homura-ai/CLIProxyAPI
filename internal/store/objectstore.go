@@ -169,6 +169,9 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 		return "", fmt.Errorf("object store: %w", errWeight)
 	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return "", fmt.Errorf("object store: %w", errModelPriority)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -608,6 +611,9 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	cliproxyauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, errWeight
+	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(&cliproxyauth.Auth{Metadata: metadata}); errModelPriority != nil {
+		return nil, errModelPriority
 	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
 	if provider == "" {
