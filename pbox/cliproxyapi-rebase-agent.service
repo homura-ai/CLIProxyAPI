@@ -1,0 +1,8 @@
+[Unit]
+Description=Start a T3 agent to rebase the CLIProxyAPI patch when the fork's sync fails
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cliproxyapi-rebase-agent

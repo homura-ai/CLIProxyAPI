@@ -1,0 +1,9 @@
+[Unit]
+Description=Check hourly for a failed CLIProxyAPI fork sync
+
+[Timer]
+OnCalendar=*-*-* *:45:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@ name: sync-upstream
 
 on:
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '17 * * * *'
   workflow_dispatch:
   push:
     branches: [automation]
@@ -48,6 +48,23 @@ jobs:
           base="$(git describe --tags --abbrev=0 --exclude '*-mp.*' HEAD)"
           echo "latest=$latest base=$base"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          head="$(git rev-parse HEAD)"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          # Nothing new: this HEAD already failed for this release (an open issue
+          # records it), or it is already fully released.
+          if gh issue list --state open --search "\"sync-upstream failed for $latest\" in:title" --json body,comments \
+               --jq '.[] | .body, .comments[].body' | grep -qF "head=$head"; then
+            echo "head $head already failed for $latest; waiting for a new patch commit"
+            echo "done=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [[ "$base" == "$latest" ]]; then
+            for t in $(git tag --points-at "$head" --list "${latest}-mp.*"); do
+              have="$(gh release view "$t" --json assets --jq '[.assets[].name] | join(" ")' 2>/dev/null || true)"
+              if [[ " $have " == *" CLIProxyAPI_${t#v}_linux_amd64.tar.gz "* && " $have " == *" checksums.txt "* ]]; then
+                echo "already released as $t"; echo "done=true" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+            done
+          fi
           if [[ "$base" != "$latest" ]]; then
             if ! git rebase --onto "$latest" "$base" HEAD; then
               git rebase --abort || true
@@ -59,11 +76,13 @@ jobs:
           fi
 
       - uses: actions/setup-go@v6
+        if: steps.rebase.outputs.done != 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Test
+        if: steps.rebase.outputs.done != 'true'
         run: |
           set -euo pipefail
           bash .github/scripts/refresh-model-catalogs.sh
@@ -88,6 +107,7 @@ jobs:
         run: git push --force-with-lease origin "HEAD:${PATCH_BRANCH}"
 
       - name: Build and release
+        if: steps.rebase.outputs.done != 'true'
         run: |
           set -euo pipefail
           latest='${{ steps.rebase.outputs.latest }}'
@@ -133,13 +153,14 @@ jobs:
           latest='${{ steps.rebase.outputs.latest }}'
           title="sync-upstream failed for ${latest:-unknown upstream release}"
           if [[ '${{ steps.rebase.outputs.conflict }}' == 'true' ]]; then
-            why="The patch branch does not rebase cleanly onto ${latest}. Rebase \`${PATCH_BRANCH}\` by hand and push; the next run releases it."
+            why="The patch branch does not rebase cleanly onto ${latest}. The pbox auto-rebase agent picks this up; a fixed push to \`${PATCH_BRANCH}\` is released by the next hourly run."
           else
             why="Tests, build or release failed. See the run log."
           fi
           existing="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
           body="${why}
 
+          head=${{ steps.rebase.outputs.head }}
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if [[ -n "$existing" ]]; then
             gh issue comment "$existing" --body "$body"
