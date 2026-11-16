@@ -404,6 +404,9 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
 	}
+	if errModelPriority := coreauth.ValidateAuthModelPriority(&coreauth.Auth{Metadata: metadata}); errModelPriority != nil {
+		return nil, fmt.Errorf("invalid auth model_priority: %w", errModelPriority)
+	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
 
@@ -432,6 +435,9 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 			}
 			if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
 				return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
+			}
+			if errModelPriority := coreauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
+				return nil, fmt.Errorf("invalid auth model_priority: %w", errModelPriority)
 			}
 			out = append(out, auth)
 		}
@@ -490,7 +496,7 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 				return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
 			}
 			coreauth.ApplyAuthPriorityMetadata(auth, metadata)
-			if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+			if auth.Attributes[coreauth.AttributeFilePriority] == "true" || auth.Attributes[coreauth.AttributeFileModelPriority] == "true" {
 				if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 					setter.SetMetadata(auth.Metadata)
 				}

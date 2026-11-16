@@ -1233,6 +1233,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	ctx = withAntigravityPriorityRequest(ctx, providers, req, executionModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
 	baseMetadata := opts.Metadata
@@ -1535,6 +1536,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	ctx = withAntigravityPriorityRequest(ctx, providers, req, executionModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
 	baseMetadata := opts.Metadata
@@ -1843,6 +1845,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
+	ctx = withAntigravityPriorityRequest(ctx, providers, req, executionModel)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
 	baseMetadata := opts.Metadata

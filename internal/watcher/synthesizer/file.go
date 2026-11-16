@@ -107,6 +107,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, false, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
+	if errModelPriority := coreauth.ValidateAuthModelPriority(&coreauth.Auth{Metadata: metadata}); errModelPriority != nil {
+		return nil, false, fmt.Errorf("invalid model_priority in %s: %w", filepath.Base(fullPath), errModelPriority)
+	}
 	// Invalid per-account rules must not drop an existing credential: keep the valid
 	// entries and warn. Write entry points (upload and PATCH) reject them before persisting.
 	perAccountExcluded, errExcluded := ExtractExcludedModelsFromMetadata(metadata)
@@ -221,7 +224,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					return nil, true, fmt.Errorf("invalid plugin auth weight in %s: %w", defaultFileName, errWeight)
 				}
 				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
-				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+				if auth.Attributes[coreauth.AttributeFilePriority] == "true" || auth.Attributes[coreauth.AttributeFileModelPriority] == "true" {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)
 					}
@@ -417,6 +420,9 @@ func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 			continue
 		}
 		if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+			continue
+		}
+		if errModelPriority := coreauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
 			continue
 		}
 		out = append(out, auth)

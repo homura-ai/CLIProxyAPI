@@ -209,6 +209,7 @@ type Manager struct {
 	executors                 map[string]ProviderExecutor
 	executorRevisions         map[string]uint64
 	selector                  Selector
+	modelPriorityRoundRobin   RoundRobinSelector
 	hook                      *hookChain
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex

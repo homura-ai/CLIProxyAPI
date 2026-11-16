@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -104,9 +105,9 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 		authID = bound.ID
 		// A binding may bypass priority or transport preference, but its traffic
 		// must only charge peers that compete with it, never another priority tier.
-		priority := authPriority(bound)
+		priority := authPriorityForRequest(ctx, bound, model)
 		for _, auth := range auths {
-			if authPriority(auth) == priority {
+			if authPriorityForRequest(ctx, auth, model) == priority {
 				available = append(available, auth)
 			}
 		}
@@ -132,7 +133,7 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 			}
 		}
 	}
-	priority := inferredWeightedPoolPriority(available)
+	priority := inferredWeightedPoolPriority(ctx, model, available)
 	key := provider + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
 	picked, pending := s.reserveScoped(key, priority, transportClass, available, authID)
 	if picked == nil {
@@ -216,13 +217,23 @@ type weightedPoolState struct {
 // exclusions and cooldowns cannot collapse smooth WRR onto the lowest Auth.IDs.
 const maxExactWeightedPoolMembers = maxSmoothWeightedStateEntries
 
-func inferredWeightedPoolPriority(available []*Auth) int {
+func inferredWeightedPoolPriority(ctx context.Context, model string, available []*Auth) int {
 	for _, auth := range available {
 		if auth != nil {
-			return authPriority(auth)
+			return authPriorityForRequest(ctx, auth, model)
 		}
 	}
 	return 0
+}
+
+// weightedPoolRouteModel extracts the model from the provider:model namespace
+// used by the low-level reservation helpers. Normal requests retain their
+// per-auth alias resolution through reserveForRequest's context instead.
+func weightedPoolRouteModel(route string) string {
+	if _, model, ok := strings.Cut(route, ":"); ok {
+		return model
+	}
+	return ""
 }
 
 func dynamicWeightedPoolKey(route string, priority int, transportClass string) string {
@@ -333,7 +344,7 @@ func (s *weightedPoolState) prepareWithVersions(weights []int64, versions []weig
 // reserve selects and reserves credit atomically. A non-empty authID preserves a
 // sticky binding; otherwise committed and pending credits both guide selection.
 func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, authID string) (*Auth, *weightedReservation) {
-	return s.reserveScoped(route, inferredWeightedPoolPriority(available), "", available, authID)
+	return s.reserveScoped(route, inferredWeightedPoolPriority(nil, weightedPoolRouteModel(route), available), "", available, authID)
 }
 
 func (s *WeightedRoundRobinSelector) reserveScoped(route string, priority int, transportClass string, available []*Auth, authID string) (*Auth, *weightedReservation) {
@@ -350,7 +361,7 @@ func (s *WeightedRoundRobinSelector) reserveScoped(route string, priority int, t
 // ID-sorted candidates and cached weights, avoiding sorting and cloning auths.
 // ids must be sorted, with one positive weight per ID in the parallel slice.
 func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
-	return s.reservePoolScoped(route, inferredWeightedPoolPriority(available), "", available, weights, ids, authID)
+	return s.reservePoolScoped(route, inferredWeightedPoolPriority(nil, weightedPoolRouteModel(route), available), "", available, weights, ids, authID)
 }
 
 func (s *WeightedRoundRobinSelector) reservePoolScoped(route string, priority int, transportClass string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {

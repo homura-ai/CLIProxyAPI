@@ -1164,10 +1164,18 @@ func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
 	if data.Attributes == nil {
 		data.Attributes = make(map[string]string)
 	}
-	for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource, coreauth.AttributeSourceBackend, coreauth.AttributeFilePriority} {
+	for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource, coreauth.AttributeSourceBackend, coreauth.AttributeFilePriority, coreauth.AttributeFileModelPriority} {
 		if value, ok := auth.Attributes[key]; ok {
 			data.Attributes[key] = value
 		}
+	}
+	if auth.Attributes[coreauth.AttributeFileModelPriority] == "true" {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]any)
+		}
+		data.Metadata[coreauth.MetadataModelPriority] = auth.Metadata[coreauth.MetadataModelPriority]
+	} else {
+		delete(data.Attributes, coreauth.AttributeFileModelPriority)
 	}
 	if auth.Attributes[coreauth.AttributeFilePriority] != "true" {
 		delete(data.Attributes, coreauth.AttributeFilePriority)
@@ -1214,6 +1222,14 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
 					s.rawJSON = cleaned
 				}
+			}
+		}
+	}
+	if _, hadOverrides := s.meta[coreauth.MetadataModelPriority]; hadOverrides {
+		if _, hasOverrides := meta[coreauth.MetadataModelPriority]; !hasOverrides {
+			doc := ojson.NewDoc(s.rawJSON)
+			if errDelete := doc.Delete(coreauth.MetadataModelPriority); errDelete == nil {
+				s.rawJSON = doc.Bytes()
 			}
 		}
 	}

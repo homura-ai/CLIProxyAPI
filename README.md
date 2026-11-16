@@ -171,6 +171,34 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 [Claude Code with a Codex backend](examples/claude-code-codex/README.md): optional visible progress, classifier routing, image-tool pass-through, and latency diagnostics.
 
+## Per-model credential priority
+
+An auth JSON file can optionally set `model_priority`, an object mapping model
+patterns to integer priorities. Higher priorities are tried first; lower tiers
+remain fallbacks when preferred credentials are unavailable or cooling down.
+For example, add these fields to two existing Claude auth files, keeping their
+other fields:
+
+```json
+{"priority": 0, "model_priority": {"claude-fable-5-2": 10}}
+```
+
+```json
+{"priority": 5, "model_priority": {"claude-fable-5-2": -10}}
+```
+
+The first account is preferred for `claude-fable-5-2`; the second is preferred
+for other models. Matching uses the resolved model name after credential prefix
+and alias resolution (without a thinking suffix), and the same case-insensitive
+`*` wildcard rules as `excluded_models` (for example, `"*fable*": -10`
+applies to every Fable model). Exact matches win over wildcards;
+otherwise the longest matching pattern wins. Equal-length ties use lexical
+order of the original pattern keys. Unmatched models use the ordinary `priority`
+(default `0`). Existing session-affinity bindings retain their usual precedence.
+Invalid objects, empty patterns, and non-integer values are rejected like invalid
+credential weights. The v8 management credential listing exposes the field;
+credential field PATCH accepts a replacement object or `null` to remove it.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
