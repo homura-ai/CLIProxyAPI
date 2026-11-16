@@ -20,6 +20,7 @@ If the rebase conflicts or the tests fail, the workflow opens an issue that reco
 2. Validates it on boat.dev.
 3. Gets a fresh Sol review.
 4. Force-pushes `model-priority` and closes the issue.
+5. Verifies that the issue is closed, then settles its T3 thread. No-change resolutions also settle; blocked repairs stay unsettled.
 
 The next hourly sync then releases the fix. The script starts one agent per failing head, never while another is still working, and at most 3 per issue. It keeps its state in `~/.local/state/cliproxyapi-rebase-agent/`.
 

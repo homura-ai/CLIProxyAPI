@@ -46,6 +46,7 @@ Steps:
 6. Comment on the issue with what changed and the new SHA, then close it. Every comment must start with:
    > [!NOTE]
    > 🤖 **<your model> responding on behalf of @01-1**
+7. Verify `gh issue view {issue} -R {repo} --json state --jq .state` returns `CLOSED`, then call `t3_thread_organize` with `action: "settle"` and omit `threadId` to settle this thread. Do this for successful repairs and no-change resolutions. Leave the thread unsettled if the issue is still open or the repair is blocked.
 
 Rules:
 - Never send requests to Anthropic or to the local proxies on ports 8317 and 8318.
