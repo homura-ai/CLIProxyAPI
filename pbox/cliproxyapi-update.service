@@ -1,5 +1,5 @@
 [Unit]
-Description=Install the newest patched CLIProxyAPI release (01-1/CLIProxyAPI)
+Description=Install the newest patched CLIProxyAPI release (homura-ai/CLIProxyAPI)
 After=network-online.target
 Wants=network-online.target
 

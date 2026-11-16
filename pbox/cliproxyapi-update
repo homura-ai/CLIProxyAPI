@@ -6,7 +6,7 @@
 # restores the previous binary if not. Never sends a request to either proxy.
 set -euo pipefail
 
-REPO="${CPA_UPDATE_REPO:-01-1/CLIProxyAPI}"
+REPO="${CPA_UPDATE_REPO:-homura-ai/CLIProxyAPI}"
 APP_DIR="${CPA_APP_DIR:-$HOME/.cli-proxy-api/app}"
 BIN="$APP_DIR/cli-proxy-api"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/cliproxyapi-update"
