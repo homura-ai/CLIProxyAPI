@@ -80,6 +80,9 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
 		return "", fmt.Errorf("auth filestore: %w", errWeight)
 	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
+		return "", fmt.Errorf("auth filestore: %w", errModelPriority)
+	}
 
 	path, err := s.resolveAuthPath(auth)
 	if err != nil {
@@ -249,6 +252,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, errWeight
 	}
+	if errModelPriority := cliproxyauth.ValidateAuthModelPriority(&cliproxyauth.Auth{Metadata: metadata}); errModelPriority != nil {
+		return nil, errModelPriority
+	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
 	if strings.EqualFold(provider, "gemini") {
@@ -305,7 +311,7 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 					return nil, errWeight
 				}
 				cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
-				if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited {
+				if auth.Attributes[cliproxyauth.AttributeFilePriority] == "true" || auth.Attributes[cliproxyauth.AttributeFileModelPriority] == "true" {
 					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 						setter.SetMetadata(auth.Metadata)
 					}
@@ -399,6 +405,9 @@ func compactPluginAuths(auths []*cliproxyauth.Auth) []*cliproxyauth.Auth {
 			continue
 		}
 		if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+			continue
+		}
+		if errModelPriority := cliproxyauth.ValidateAuthModelPriority(auth); errModelPriority != nil {
 			continue
 		}
 		out = append(out, auth)
