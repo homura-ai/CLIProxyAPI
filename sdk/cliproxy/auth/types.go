@@ -601,6 +601,12 @@ func cloneMetadataValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneMetadataMap(typed)
+	case map[string]int:
+		priorities := make(map[string]int, len(typed))
+		for pattern, priority := range typed {
+			priorities[pattern] = priority
+		}
+		return priorities
 	case []string:
 		s := make([]string, len(typed))
 		copy(s, typed)

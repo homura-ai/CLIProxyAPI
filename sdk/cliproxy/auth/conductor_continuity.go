@@ -760,7 +760,7 @@ func (m *Manager) buildCodexContinuityCandidates(
 		item := pluginapi.SchedulerContinuityCandidate{
 			ID:         candidate.ID,
 			Provider:   "codex",
-			Priority:   authPriority(candidate),
+			Priority:   authPriorityForModel(candidate, m.priorityModelForAuth(candidate, model)),
 			Status:     string(candidate.Status),
 			InCooldown: blocked && reason == blockReasonCooldown,
 			Attributes: schedulerSafeAttributes(candidate.Attributes),
