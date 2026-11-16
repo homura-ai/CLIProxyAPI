@@ -66,8 +66,20 @@ jobs:
           set -euo pipefail
           bash .github/scripts/refresh-model-catalogs.sh
           go vet ./sdk/cliproxy/auth/...
-          # One retry: upstream's TestServerResponsesWebsocketReauthorizesEachTurn is intermittently flaky.
-          go test ./... || go test -count=1 ./...
+          # Gate: no test may fail on the patched branch unless it also fails on
+          # the unmodified upstream release. A failure must repeat to count (flakes).
+          fails() { go test -count=1 -json "$@" 2>/dev/null | jq -r 'select(.Action=="fail") | .Package+" "+(.Test // "")' | sort -u || true; }
+          first="$(fails ./...)"
+          [[ -z "$first" ]] && { echo "all tests pass"; exit 0; }
+          pkgs="$(cut -d' ' -f1 <<<"$first" | sort -u)"
+          patched="$(comm -12 <(echo "$first") <(fails $pkgs))"
+          [[ -z "$patched" ]] && { echo "failures did not repeat (flaky): $first"; exit 0; }
+          latest='${{ steps.rebase.outputs.latest }}'
+          git worktree add -q /tmp/upstream "$latest"
+          base="$(cd /tmp/upstream && bash .github/scripts/refresh-model-catalogs.sh >/dev/null && fails $pkgs)"
+          new="$(comm -23 <(echo "$patched") <(echo "$base"))"
+          echo "patched failures:"; echo "$patched"; echo "upstream $latest failures:"; echo "$base"
+          [[ -z "$new" ]] || { echo "::error::failures not present upstream:"; echo "$new"; exit 1; }
 
       - name: Push rebased branch
         if: steps.rebase.outputs.rebased == 'true'
