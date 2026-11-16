@@ -901,7 +901,10 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
 		return available
 	}
+	return preferWebsocketAuths(available)
+}
 
+func preferWebsocketAuths(available []*Auth) []*Auth {
 	wsEnabled := make([]*Auth, 0, len(available))
 	for i := 0; i < len(available); i++ {
 		candidate := available[i]
@@ -925,7 +928,7 @@ func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, mo
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, model, now, clientHeaders...)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityForRequest(ctx, candidate, model)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
@@ -961,7 +964,7 @@ func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Aut
 			// unrelated cooldowns. Affinity bindings may span all priority tiers, but
 			// fallback selection must still use the highest available tier.
 			if !allPriorities {
-				return highestPriorityAuths(auths), nil
+				return highestPriorityAuths(ctx, auths, model), nil
 			}
 			return auths, nil
 		}
@@ -1042,14 +1045,14 @@ func availableAuthsFromPriorityBuckets(availableByPriority map[int][]*Auth, allP
 // highestPriorityAuths narrows an availability slice to its highest priority tier while
 // preserving the input order. The input slice is returned unchanged when every candidate
 // already shares the highest priority, so the common single-tier case allocates nothing.
-func highestPriorityAuths(auths []*Auth) []*Auth {
+func highestPriorityAuths(ctx context.Context, auths []*Auth, model string) []*Auth {
 	if len(auths) <= 1 {
 		return auths
 	}
 	bestPriority := 0
 	bestCount := 0
 	for _, auth := range auths {
-		priority := authPriority(auth)
+		priority := authPriorityForRequest(ctx, auth, model)
 		switch {
 		case bestCount == 0 || priority > bestPriority:
 			bestPriority = priority
@@ -1063,7 +1066,7 @@ func highestPriorityAuths(auths []*Auth) []*Auth {
 	}
 	highest := make([]*Auth, 0, bestCount)
 	for _, auth := range auths {
-		if authPriority(auth) == bestPriority {
+		if authPriorityForRequest(ctx, auth, model) == bestPriority {
 			highest = append(highest, auth)
 		}
 	}
@@ -1694,7 +1697,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil && !s.rebindOnNever {
 		return nil, err
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := highestPriorityAuths(ctx, available, model)
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1955,7 +1958,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
-	fallbackAuths := highestPriorityAuths(available)
+	fallbackAuths := highestPriorityAuths(ctx, available, model)
 	auth, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, reservation)
 	if errPick != nil {
 		return nil, true, errPick

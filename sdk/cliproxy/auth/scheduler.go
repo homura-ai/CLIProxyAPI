@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +65,6 @@ type providerScheduler struct {
 type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
-	priority          int
 	weight            int64
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
@@ -83,6 +83,7 @@ type modelScheduler struct {
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
 type scheduledAuth struct {
 	meta        *scheduledAuthMeta
+	priority    int
 	auth        *Auth
 	state       scheduledState
 	nextRetryAt time.Time
@@ -90,8 +91,9 @@ type scheduledAuth struct {
 
 // readyBucket keeps the ready views for one priority level.
 type readyBucket struct {
-	all readyView
-	ws  readyView
+	all                readyView
+	ws                 readyView
+	resolvedRoundRobin bool
 }
 
 // readyView holds the selection order for flat round-robin traversal.
@@ -110,8 +112,31 @@ type readyViewCursorState struct {
 }
 
 type readyBucketCursorState struct {
-	all readyViewCursorState
-	ws  readyViewCursorState
+	all                readyViewCursorState
+	ws                 readyViewCursorState
+	resolvedRoundRobin bool
+}
+
+func snapshotReadyBucketCursors(bucket *readyBucket) readyBucketCursorState {
+	return readyBucketCursorState{
+		all:                snapshotReadyViewCursors(bucket.all),
+		ws:                 snapshotReadyViewCursors(bucket.ws),
+		resolvedRoundRobin: bucket.resolvedRoundRobin,
+	}
+}
+
+func (m *modelScheduler) restoreBucketCursors(priority int, state readyBucketCursorState) {
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		if !state.resolvedRoundRobin {
+			return
+		}
+		bucket = &readyBucket{}
+		m.readyByPriority[priority] = bucket
+	}
+	bucket.resolvedRoundRobin = state.resolvedRoundRobin
+	restoreReadyViewCursors(&bucket.all, state.all)
+	restoreReadyViewCursors(&bucket.ws, state.ws)
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
@@ -307,10 +332,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 					if bucket == nil {
 						continue
 					}
-					bucketCursors[priority] = readyBucketCursorState{
-						all: snapshotReadyViewCursors(bucket.all),
-						ws:  snapshotReadyViewCursors(bucket.ws),
-					}
+					bucketCursors[priority] = snapshotReadyBucketCursors(bucket)
 				}
 				if len(bucketCursors) > 0 {
 					modelCursors[modelKey] = bucketCursors
@@ -345,10 +367,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 				continue
 			}
 			for priority, cursorState := range bucketCursors {
-				if bucket := shard.readyByPriority[priority]; bucket != nil {
-					restoreReadyViewCursors(&bucket.all, cursorState.all)
-					restoreReadyViewCursors(&bucket.ws, cursorState.ws)
-				}
+				shard.restoreBucketCursors(priority, cursorState)
 			}
 		}
 	}
@@ -628,7 +647,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			pinnedPredicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, true)
 			return nil, "", shard.unavailableErrorLocked("mixed", model, pinnedPredicate)
 		}
-		bestPriority, hasCandidate = pinned.meta.priority, true
+		bestPriority, hasCandidate = pinned.priority, true
 	}
 	if !hasCandidate {
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
@@ -648,7 +667,6 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
 		for _, shard := range candidateShards {
@@ -681,24 +699,39 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 
 	weights := make([]int, len(normalized))
-	segmentStarts := make([]int, len(normalized))
-	segmentEnds := make([]int, len(normalized))
-	totalWeight := 0
 	for providerIndex, shard := range candidateShards {
-		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
 			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, predicate)
 		}
+	}
+	picked, providerKey := s.pickMixedRoundRobinLocked(normalized, modelKey, weights, func(index int) *Auth {
+		return candidateShards[index].pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+	})
+	if picked == nil {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+	return picked, providerKey, nil
+}
+
+// pickMixedRoundRobinLocked rotates across provider slots weighted by the
+// number of ready credentials in the highest priority tier.
+func (s *authScheduler) pickMixedRoundRobinLocked(providers []string, modelKey string, weights []int, pick func(int) *Auth) (*Auth, string) {
+	cursorKey := strings.Join(providers, ",") + ":" + modelKey
+	segmentStarts := make([]int, len(providers))
+	segmentEnds := make([]int, len(providers))
+	totalWeight := 0
+	for providerIndex := range providers {
+		segmentStarts[providerIndex] = totalWeight
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, ""
 	}
 
 	startSlot := s.mixedCursors[cursorKey] % totalWeight
 	startProviderIndex := -1
-	for providerIndex := range normalized {
+	for providerIndex := range providers {
 		if weights[providerIndex] == 0 {
 			continue
 		}
@@ -708,31 +741,26 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 	}
 	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+		return nil, ""
 	}
 
 	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (startProviderIndex + offset) % len(normalized)
+	for offset := 0; offset < len(providers); offset++ {
+		providerIndex := (startProviderIndex + offset) % len(providers)
 		if weights[providerIndex] == 0 {
 			continue
 		}
 		if providerIndex != startProviderIndex {
 			slot = segmentStarts[providerIndex]
 		}
-		providerKey := normalized[providerIndex]
-		shard := candidateShards[providerIndex]
-		if shard == nil {
-			continue
-		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := pick(providerIndex)
 		if picked == nil {
 			continue
 		}
 		s.mixedCursors[cursorKey] = slot + 1
-		return picked, providerKey, nil
+		return picked, providers[providerIndex]
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	return nil, ""
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -1118,9 +1146,10 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
 
-	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
+	priorityChanged := existingMeta != nil && !reflect.DeepEqual(existingMeta.auth.Metadata[MetadataModelPriority], auth.Metadata[MetadataModelPriority])
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || priorityChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
-		// or when credential-level availability transitioned.
+		// when credential-level availability transitions, or when priorities change.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)
@@ -1193,7 +1222,6 @@ func buildScheduledAuthMetaWithModelSet(auth *Auth, modelSet map[string]struct{}
 	return &scheduledAuthMeta{
 		auth:              clonedAuth,
 		providerKey:       providerKey,
-		priority:          authPriority(auth),
 		weight:            authWeight(auth),
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: modelSet,
@@ -1353,11 +1381,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousPriority := 0
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
-		previousPriority = entry.meta.priority
+		previousPriority = entry.priority
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
 
 	entry.meta = meta
+	entry.priority = authPriorityForModel(meta.auth, rewriteModelForAuth(m.modelKey, meta.auth))
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
 	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
@@ -1374,7 +1403,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == entry.priority && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -1551,6 +1580,20 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 		}
 	}
 	return count
+}
+
+// pickResolvedRoundRobinLocked updates the same cursor as a native pick at this
+// priority. A resolved-only tier keeps an empty bucket to hold its cursor.
+func (m *modelScheduler) pickResolvedRoundRobinLocked(priority int, auths []*Auth) *Auth {
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		bucket = &readyBucket{}
+		m.readyByPriority[priority] = bucket
+	}
+	bucket.resolvedRoundRobin = true
+	picked := auths[successorIndex(auths, bucket.all.lastPicked)]
+	bucket.all.lastPicked = picked.ID
+	return picked
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
@@ -1746,10 +1789,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		if bucket == nil {
 			continue
 		}
-		cursorStates[priority] = readyBucketCursorState{
-			all: snapshotReadyViewCursors(bucket.all),
-			ws:  snapshotReadyViewCursors(bucket.ws),
-		}
+		cursorStates[priority] = snapshotReadyBucketCursors(bucket)
 	}
 
 	m.readyByPriority = make(map[int]*readyBucket)
@@ -1762,7 +1802,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		switch entry.state {
 		case scheduledStateReady:
-			priority := entry.meta.priority
+			priority := entry.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
@@ -1772,13 +1812,11 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		bucket := buildReadyBucket(entries)
-		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
-			restoreReadyViewCursors(&bucket.all, cursorState.all)
-			restoreReadyViewCursors(&bucket.ws, cursorState.ws)
-		}
-		m.readyByPriority[priority] = bucket
+		m.readyByPriority[priority] = buildReadyBucket(entries)
 		m.priorityOrder = append(m.priorityOrder, priority)
+	}
+	for priority, state := range cursorStates {
+		m.restoreBucketCursors(priority, state)
 	}
 	sort.Slice(m.priorityOrder, func(i, j int) bool {
 		return m.priorityOrder[i] > m.priorityOrder[j]
