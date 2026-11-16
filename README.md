@@ -4,13 +4,24 @@ This fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIPro
 
 ## Keeping up with upstream
 
-`.github/workflows/sync-upstream.yml` runs every 6 hours. It does the following:
+`.github/workflows/sync-upstream.yml` runs every hour and stops early when nothing has changed. It does the following:
 
 1. Rebases `model-priority` onto the latest upstream release.
 2. Runs `go vet` and `go test ./...`.
 3. Publishes a release tagged `v<upstream>-mp.<n>` with a linux-amd64 build and `checksums.txt`.
 
-If the rebase conflicts or the tests fail, the workflow opens an issue and publishes nothing.
+If the rebase conflicts or the tests fail, the workflow opens an issue that records the failing patch head (`head=<sha>`), and publishes nothing.
+
+## Auto-rebase agent (pbox)
+
+`pbox/cliproxyapi-rebase-agent` runs hourly at :45 from a user timer. For each open `sync-upstream failed for <tag>` issue, it starts a T3 agent (Sol, xhigh) in the `cliproxyapi` project. The agent:
+
+1. Rebases or fixes the patch.
+2. Validates it on boat.dev.
+3. Gets a fresh Sol review.
+4. Force-pushes `model-priority` and closes the issue.
+
+The next hourly sync then releases the fix. The script starts one agent per failing head, never while another is still working, and at most 3 per issue. It keeps its state in `~/.local/state/cliproxyapi-rebase-agent/`.
 
 ## pbox install
 
@@ -19,9 +30,9 @@ If the rebase conflicts or the tests fail, the workflow opens an issue and publi
 To install it:
 
 ```
-install -m 755 pbox/cliproxyapi-update ~/.local/bin/
-cp pbox/cliproxyapi-update.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now cliproxyapi-update.timer
+install -m 755 pbox/cliproxyapi-update pbox/cliproxyapi-rebase-agent ~/.local/bin/
+cp pbox/cliproxyapi-update.{service,timer} pbox/cliproxyapi-rebase-agent.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now cliproxyapi-update.timer cliproxyapi-rebase-agent.timer
 ```
 
 To roll back by hand:
