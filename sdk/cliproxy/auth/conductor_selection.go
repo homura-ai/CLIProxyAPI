@@ -937,7 +937,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := authPriorityForModel(candidate, m.priorityModelForAuth(candidate, routeModel))
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
@@ -1021,13 +1021,13 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 	if schedulerAcross {
 		priorityAuths = allAuths
 	} else {
-		priorityAuths = highestPriorityAuths(allAuths)
+		priorityAuths = highestPriorityAuths(m.withPriorityModelResolver(ctx, routeModel), allAuths, routeModel)
 	}
 
 	if sessionAffinity {
 		selectorAuths = allAuths
 	} else {
-		selectorAuths = highestPriorityAuths(allAuths)
+		selectorAuths = highestPriorityAuths(m.withPriorityModelResolver(ctx, routeModel), allAuths, routeModel)
 	}
 	return priorityAuths, selectorAuths, nil
 }
@@ -1039,7 +1039,8 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 	return routeModel
 }
 
-func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
+func (m *Manager) selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
+	ctx = m.withPriorityModelResolver(ctx, routeModel)
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
 	if !isBuiltInSelector(selector) {
 		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
@@ -1250,7 +1251,7 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 	return out
 }
 
-func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+func (m *Manager) schedulerAuthCandidates(auths []*Auth, model string) []pluginapi.SchedulerAuthCandidate {
 	if len(auths) == 0 {
 		return nil
 	}
@@ -1262,7 +1263,7 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 		out = append(out, pluginapi.SchedulerAuthCandidate{
 			ID:         auth.ID,
 			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
-			Priority:   authPriority(auth),
+			Priority:   authPriorityForModel(auth, m.priorityModelForAuth(auth, model)),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
 		})
@@ -1322,11 +1323,14 @@ func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
 	}
 }
 
-func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, bool, error) {
+func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
 	if m == nil || m.scheduler == nil {
 		return nil, false, nil
 	}
-	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	providerKey := canonicalSchedulingProvider(provider)
+	if selected, handled, errPick := m.pickBuiltinForResolvedRoute(ctx, strategy, providerKey, providers, model, opts, tried, candidates); handled {
+		return selected, true, errPick
+	}
 	var selected *Auth
 	var errPick error
 	beforeVer := m.syncedVersion.Load()
@@ -1348,6 +1352,74 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 		return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	return selected, true, nil
+}
+
+// Cached scheduler shards cannot resolve priority overrides against per-auth
+// alias targets or distinguish exact published routes from base-route fallbacks.
+func (m *Manager) pickBuiltinForResolvedRoute(ctx context.Context, strategy schedulerStrategy, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
+	providers = normalizeProviderKeys(providers)
+	requiresResolution := strings.TrimSpace(model) != "" && containsProvider(providers, "copilot")
+	if !requiresResolution && strings.TrimSpace(model) != "" && containsProvider(providers, "devin") {
+		// An exact-only credential can enter the base shard even when the route
+		// filter has already removed it from candidates.
+		eligibility := authSelectionEligibilityForRequest(ctx, opts)
+		pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+		m.mu.RLock()
+		for _, auth := range m.auths {
+			if isAuthDisabled(auth) || !strings.EqualFold(strings.TrimSpace(auth.Provider), "devin") || !eligibility.allows(auth) {
+				continue
+			}
+			if pinnedAuthID != "" && auth.ID != pinnedAuthID {
+				continue
+			}
+			if _, used := tried[auth.ID]; !used && m.routeAwareSelectionRequired(auth, model) {
+				requiresResolution = true
+				break
+			}
+		}
+		m.mu.RUnlock()
+	}
+	if !requiresResolution {
+		for _, auth := range candidates {
+			if auth == nil {
+				continue
+			}
+			if _, hasOverrides := auth.Metadata[MetadataModelPriority]; hasOverrides && m.routeAwareSelectionRequired(auth, model) {
+				requiresResolution = true
+				break
+			}
+		}
+	}
+	if !requiresResolution {
+		return nil, false, nil
+	}
+	candidates = filterAuthsExcluding(candidates, tried)
+	m.mu.RLock()
+	available, errAvailable := m.availableAuthsForRouteModelForRequest(ctx, candidates, provider, model, time.Now(), true, opts.Headers)
+	available = cloneAuthSlice(available)
+	m.mu.RUnlock()
+	if errAvailable != nil {
+		return nil, true, errAvailable
+	}
+	// The cached scheduler prefers WebSocket credentials across ready tiers for single-provider requests.
+	if len(providers) == 1 && providerPrefersWebsocketTransport(providers[0]) && cliproxyexecutor.DownstreamWebsocket(ctx) && pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		available = preferWebsocketAuths(available)
+	}
+	selector := &m.modelPriorityRoundRobin
+	ctx = m.selectorContextForAvailableAuths(ctx, selector, model)
+	if strategy == schedulerStrategyFillFirst {
+		highest := highestPriorityAuths(ctx, available, model)
+		for _, providerKey := range providers {
+			for _, auth := range highest {
+				if canonicalSchedulingProvider(executorKeyFromAuth(auth)) == providerKey {
+					return auth, true, nil
+				}
+			}
+		}
+		return nil, true, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	selected, errPick := selector.Pick(ctx, provider, model, opts, available)
+	return selected, true, restoreModelCooldownErrorModel(errPick, model)
 }
 
 func clearSchedulerSelectionID(meta map[string]any) {
@@ -1406,7 +1478,7 @@ func filterAuthsExcluding(auths []*Auth, excluded map[string]struct{}) []*Auth {
 	return filtered
 }
 
-func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, map[string]struct{}, error) {
+func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates, allCandidates []*Auth) (*Auth, bool, map[string]struct{}, error) {
 	if scheduler == nil || len(candidates) == 0 {
 		clearSchedulerSelectionID(opts.Metadata)
 		return nil, false, nil, nil
@@ -1435,7 +1507,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: m.schedulerAuthCandidates(candidates, model),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
@@ -1466,7 +1538,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		return nil, false, nil, nil
 	}
 	effectiveTried := mergeTriedAuthIDs(tried, excluded)
-	selected, handledBuiltin, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, effectiveTried)
+	selected, handledBuiltin, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, effectiveTried, allCandidates)
 	if errBuiltin == nil && handledBuiltin && selected != nil {
 		keepSelectionID = true
 	}
@@ -2406,9 +2478,16 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 			})
 		}
 		if route.SourceModelID != "" {
-			// The base-model shard can handle routes whose public and state keys agree.
-			return thinking.ParseSuffix(route.ID).HasSuffix || !sameCanonicalModelKey(route.SourceModelID, routeModel)
+			if thinking.ParseSuffix(route.ID).HasSuffix || !sameCanonicalModelKey(route.SourceModelID, routeModel) {
+				return true
+			}
+			// The shard strips credential prefixes even when the published source retains them.
+			_, hasOverrides := auth.Metadata[MetadataModelPriority]
+			return hasOverrides && !sameCanonicalModelKey(route.SourceModelID, rewriteModelForAuth(canonicalModelLookupKey(routeModel), auth))
 		}
+	}
+	if _, hasOverrides := auth.Metadata[MetadataModelPriority]; hasOverrides && !sameCanonicalModelKey(m.priorityModelForAuth(auth, routeModel), routeModel) {
+		return true
 	}
 	return !sameCanonicalModelKey(m.selectionModelForAuth(auth, routeModel), routeModel)
 }
@@ -2525,7 +2604,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
-	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available, candidates)
 	effectiveTried := mergeTriedAuthIDs(tried, excluded)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, effectiveTried, errPick)
@@ -2560,7 +2639,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 			m.mu.RUnlock()
 		}
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := m.selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		if accountingAuths != nil {
 			selectorCtx = context.WithValue(selectorCtx, weightedAccountingPoolKey{}, accountingAuths)
@@ -3023,7 +3102,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
-	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available, candidates)
 	effectiveTried := mergeTriedAuthIDs(tried, excluded)
 	if errPick != nil {
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, effectiveTried, errPick)
@@ -3058,7 +3137,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 			m.mu.RUnlock()
 		}
-		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
+		selectorCtx := m.selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		if accountingAuths != nil {
 			selectorCtx = context.WithValue(selectorCtx, weightedAccountingPoolKey{}, accountingAuths)
