@@ -7,10 +7,10 @@ This fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIPro
 `.github/workflows/sync-upstream.yml` runs every hour and stops early when nothing has changed. It does the following:
 
 1. Rebases `model-priority` onto the latest upstream release.
-2. Runs `go vet` and `go test ./...`.
+2. Refreshes the model catalogs, runs `go vet ./sdk/cliproxy/auth/...`, and runs `go test -count=1 -json ./...`. Test failures block release only if they repeat on the patch branch and are absent from the unmodified upstream release.
 3. Publishes a release tagged `v<upstream>-mp.<n>` with a linux-amd64 build and `checksums.txt`.
 
-If the rebase conflicts or the tests fail, the workflow opens an issue that records the failing patch head (`head=<sha>`), and publishes nothing.
+If the rebase conflicts or the validation gate fails, the workflow opens or updates an issue that records the failing patch head (`head=<sha>`), and publishes nothing. Build or release failures are also recorded in the issue.
 
 ## Auto-rebase agent (pbox)
 
