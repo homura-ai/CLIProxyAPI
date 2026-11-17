@@ -188,6 +188,16 @@ class CatalogTests(unittest.TestCase):
         general["claude"][0]["context_length"] = 99
         self.assertEqual(self.official["claude"][-1]["context_length"], 1000000)
 
+    def test_known_claude_alias_keeps_its_official_version_capabilities(self):
+        old = {"id": "claude-haiku-4-5-20251001", "context_length": 200000,
+               "thinking": {"min": 1024, "max": 128000}}
+        new = {"id": "claude-haiku-5-5", "context_length": 1000000,
+               "thinking": {"dynamic_allowed": True}}
+        general = {"claude": [old, new]}
+        catalog.add_claude(general, {"claude-haiku-4-5": "Haiku 4.5"})
+        self.assertEqual(general["claude"][0]["thinking"], old["thinking"])
+        self.assertEqual(general["claude"][0]["context_length"], 200000)
+
     def test_manual_exclusions_survive_removal_of_owned_exclusions(self):
         self.assertEqual(catalog.main(), 0)
         self.backend[self.b.stem].append(self.new)

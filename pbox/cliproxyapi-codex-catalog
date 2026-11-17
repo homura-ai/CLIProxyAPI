@@ -209,7 +209,10 @@ def add_claude(catalog, models):
         if not templates:
             log(f"warn: no Claude family template for {slug}; skipped")
             continue
-        entry = copy.deepcopy(max(templates, key=lambda e: family(e["id"])[1]))
+        # An undated alias of an official model keeps that model's capabilities.
+        version = family(re.sub(r"-\d{8}$", "", slug))[1]
+        matching = [e for e in templates if family(re.sub(r"-\d{8}$", "", e["id"]))[1] == version]
+        entry = copy.deepcopy(max(matching or templates, key=lambda e: family(e["id"])[1]))
         entry.update(id=slug, display_name=name)
         entries.insert(0, entry)
         added.append(slug)
