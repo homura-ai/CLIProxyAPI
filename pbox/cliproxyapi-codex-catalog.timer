@@ -1,5 +1,5 @@
 [Unit]
-Description=Sync CLIProxyAPI Codex catalog with the accounts every 10 minutes
+Description=Sync CLIProxyAPI Codex and Claude catalogs every 10 minutes
 
 [Timer]
 OnBootSec=2min
