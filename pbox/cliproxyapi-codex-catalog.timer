@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync CLIProxyAPI Codex catalog with the accounts every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

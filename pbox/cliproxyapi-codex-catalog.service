@@ -1,0 +1,7 @@
+[Unit]
+Description=Add Codex models the accounts serve but the CLIProxyAPI catalog lacks
+After=cliproxyapi.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cliproxyapi-codex-catalog
