@@ -1,30 +1,22 @@
 #!/usr/bin/python3 -I
-"""Keep CLIProxyAPI's Codex model catalogs in step with what the Codex accounts serve.
+"""Overlay served Codex slugs and locally discovered Claude ids on official catalogs.
 
-Every run:
-1. Asks each Codex account in auth-dir which models it serves (chatgpt.com
-   backend-api/codex/models, the same call Codex CLI makes).
-2. Writes local copies of the official catalogs (models.json and
-   codex_client_models.json) plus every gpt-* slug an account serves that the
-   official catalog lacks. A models.json entry is cloned from the newest entry
-   of the same family (astra, sol, terra, luna) with id, name and context
-   taken from the backend; the Codex client entry is the backend's own.
-   Once the official catalog lists a slug, the official entry wins.
-3. Sets excluded_models on each account file to the gpt-* slugs other accounts
-   serve but this one does not (only exclusions this script added are ever
-   removed), so the proxy never routes a model to an account without it.
-4. Points config.yaml models.catalog / models.codex-catalog at the local files
-   (once) and asks the proxy to reload them when they change.
+Only Codex discovery and public GitHub downloads use HTTP. Claude ids come from
+Claude Code's T3 cache and explicit ids in model-release-watch's local outbox.
+Alternating local catalog paths trigger config hot reloads without calling the
+Claude proxy, restarting either proxy, or waiting for the three-hour refresh.
 """
-import json, os, re, subprocess, sys, tempfile, urllib.request
+import copy, fcntl, json, os, re, subprocess, sys, tempfile, urllib.request
 from pathlib import Path
 
 HOME = Path.home()
 CONFIG = Path(os.environ.get("CPA_CONFIG", HOME / ".cli-proxy-api/config.yaml"))
 OUT = Path(os.environ.get("CPA_CATALOG_DIR", HOME / ".cli-proxy-api/catalogs"))
 STATE = OUT / "state.json"
-MGMT_KEY = HOME / "credentials/cliproxyapi/management-key"
-PROXY = os.environ.get("CPA_URL", "http://127.0.0.1:8317")
+CLAUDE_CONFIG = Path(os.environ.get("CPA_CLAUDE_CONFIG", HOME / ".cli-proxy-api-claude/config.yaml"))
+CLAUDE_CACHE = HOME / ".t3/caches/claudeAgent.json"
+ALERTS = HOME / ".local/state/model-release-watch"
+T3 = HOME / ".t3/bin/t3"
 OFFICIAL = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/"
 CODEX_MODELS = "https://chatgpt.com/backend-api/codex/models?client_version="
 CODEX_CHANNELS = ("codex-free", "codex-plus", "codex-team", "codex-pro")
@@ -41,25 +33,67 @@ def get(url, headers=None, timeout=30):
         return json.load(r)
 
 
-def write_atomic(path, data, mode=0o600):
-    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+def encoded(data):
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def write_text(path, text, inplace=False):
     if path.exists() and path.read_text() == text:
         return False
     if DRY:
         log(f"dry-run: would write {path}")
         return True
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if inplace:
+        # CLIProxyAPI watches the config inode, rather than its parent directory.
+        with path.open("r+") as f:
+            f.write(text)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     with os.fdopen(fd, "w") as f:
         f.write(text)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    os.replace(tmp, path)  # mkstemp uses mode 600, including for configs/auth files
     return True
 
 
-def config_value(key):
-    m = re.search(rf"^\s*{re.escape(key)}:\s*\"?([^\"\n]+?)\"?\s*$", CONFIG.read_text(), re.M)
+def write_atomic(path, data):
+    return write_text(path, encoded(data))
+
+
+def config_value(key, config=None):
+    config = config or CONFIG
+    m = re.search(rf'^\s*{re.escape(key)}:\s*"?([^"\n]+?)"?\s*$', config.read_text(), re.M)
     return m.group(1) if m else None
+
+
+def publish(config, out, catalogs):
+    """Switch only changed sources, preserving unrelated config and models keys."""
+    text = config.read_text()
+    block = re.search(r"^models:[ \t]*(?:\{\})?[ \t]*(?:#.*)?\n(?:[ \t]+[^\n]*\n|[ \t]*\n)*", text, re.M)
+    if re.search(r"^models:", text, re.M) and not block:
+        raise ValueError(f"{config}: models must use a block mapping")
+    body = block.group() if block else "models:\n"
+    body = re.sub(r"^models:[^\n]*", "models:", body)
+    changed = False
+    for key, (name, data) in catalogs.items():
+        current = config_value(key, config)
+        first = out / f"{name}.json"
+        second = out / f"{name}-next.json"
+        payload = encoded(data)
+        if current in (str(first), str(second)) and Path(current).exists() and Path(current).read_text() == payload:
+            target = Path(current)
+        else:
+            target = second if current == str(first) else first
+            changed |= write_text(target, payload)
+        line = f"  {key}: {target}\n"
+        pattern = rf"^[ \t]+{re.escape(key)}:[^\n]*(?:\n|$)"
+        body = re.sub(pattern, lambda _: line, body, flags=re.M) if re.search(pattern, body, re.M) else body + line
+    new = text[:block.start()] + body + text[block.end():] if block else body + text
+    changed |= write_text(config, new, inplace=True)
+    return changed
 
 
 def codex_version():
@@ -74,7 +108,7 @@ def served_by_account(auth_dir):
     """{auth file: {slug: backend entry}} for every enabled Codex account."""
     version = codex_version()
     result = {}
-    for f in sorted(auth_dir.glob("codex-*.json")):
+    for f in sorted(auth_dir.glob("*.json")):
         try:
             auth = json.loads(f.read_text())
             if auth.get("disabled") or auth.get("type") != "codex":
@@ -84,70 +118,107 @@ def served_by_account(auth_dir):
             if auth.get("account_id"):
                 headers["Chatgpt-Account-Id"] = auth["account_id"]
             models = get(CODEX_MODELS + version, headers)["models"]
+            if not models:
+                raise ValueError("empty model list")
             result[f] = {m["slug"]: m for m in models if m.get("slug")}
-        except Exception as e:  # one account failing must not drop its models
+            if not result[f]:
+                raise ValueError("model list has no slugs")
+        except Exception as e:
             log(f"warn: {f.name[:14]}…: {e}")
             result[f] = None
     return result
 
 
 def family(slug):
-    m = re.fullmatch(r"gpt-(\d+(?:\.\d+)?)-([a-z]+)", slug)
-    return (m.group(2), float(m.group(1))) if m else (None, 0)
+    m = re.fullmatch(r"gpt-(\d+(?:\.\d+)*?)-([a-z][a-z0-9-]*)", slug)
+    if m:
+        return m[2], tuple(map(int, m[1].split(".")))
+    m = re.fullmatch(r"claude-([a-z]+)-(\d+(?:-\d+)*)", slug)
+    if m:
+        return m[1], tuple(map(int, m[2].split("-")))
+    m = re.fullmatch(r"claude-(\d+(?:-\d+)*)-([a-z]+)(?:-\d{8})?", slug)
+    return (m[2], tuple(map(int, m[1].split("-")))) if m else (None, ())
 
 
-def catalog_entry(slug, backend, catalog):
+def catalog_entry(slug, backend, entries):
     fam, ver = family(slug)
-    templates = [(family(e["id"])[1], e) for ch in CODEX_CHANNELS for e in catalog.get(ch, [])
-                 if family(e["id"])[0] == fam and fam]
-    if not templates:
-        return None
-    entry = json.loads(json.dumps(max(templates, key=lambda t: t[0])[1]))
-    entry.update(id=slug, display_name=backend.get("display_name", slug).replace("-", " "),
-                 version=f"gpt-{ver}")
-    if backend.get("description"):
-        entry["description"] = backend["description"]
-    if backend.get("context_window"):
-        entry["context_length"] = backend["context_window"]
+    templates = [e for e in entries if fam and family(e["id"])[0] == fam]
+    entry = copy.deepcopy(max(templates, key=lambda e: family(e["id"])[1])) if templates else {
+        "object": "model", "owned_by": "openai", "type": "openai"}
+    entry.update(id=slug, display_name=backend.get("display_name") or slug)
+    if ver:
+        entry["version"] = "gpt-" + ".".join(map(str, ver))
+    for source, dest in [("description", "description"), ("context_window", "context_length"),
+                         ("max_output_tokens", "max_completion_tokens"), ("input_modalities", "supportedInputModalities")]:
+        if backend.get(source) is not None:
+            entry[dest] = backend[source]
+    if "supported_reasoning_levels" in backend:
+        levels = [e["effort"] for e in backend["supported_reasoning_levels"] if e.get("effort")]
+        entry.pop("thinking", None)
+        if levels:
+            entry["thinking"] = {"levels": levels}
     return entry
 
 
-def main():
-    auth_dir = Path(config_value("auth-dir") or HOME / ".cli-proxy-api/auth").expanduser()
-    state = json.loads(STATE.read_text()) if STATE.exists() else {"exclusions": {}}
-    served = served_by_account(auth_dir)
-    known = {f: s for f, s in served.items() if s is not None}
-    if not known:
-        log("no account answered; nothing changed")
-        return 1
+def add_codex(catalog, client, served):
     all_served = {}
-    for s in known.values():
-        for slug, entry in s.items():
-            all_served.setdefault(slug, entry)
-
-    catalog = get(OFFICIAL + "models.json")
-    client = get(OFFICIAL + "codex_client_models.json")
-    in_catalog = {e["id"] for ch in CODEX_CHANNELS for e in catalog.get(ch, [])}
-    in_client = {m["slug"] for m in client["models"]}
+    for models in served.values():
+        all_served.update(models)
+    entries = [e for ch in CODEX_CHANNELS for e in catalog.get(ch, [])]
+    official = {e["id"]: e for e in entries}
+    client_ids = {e["slug"] for e in client["models"]}
     added = []
     for slug, backend in sorted(all_served.items()):
-        if not slug.startswith("gpt-") or slug in in_catalog:
-            continue
-        entry = catalog_entry(slug, backend, catalog)
-        if entry is None:
-            continue
+        entry = official.get(slug) or catalog_entry(slug, backend, entries)
         for ch in CODEX_CHANNELS:
-            if ch in catalog:
-                catalog[ch].insert(0, dict(entry))
-        if slug not in in_client:
+            if not any(e["id"] == slug for e in catalog.setdefault(ch, [])):
+                catalog[ch].insert(0, copy.deepcopy(entry))
+                if slug not in added:
+                    added.append(slug)
+        if slug not in client_ids:
             client["models"].insert(0, backend)
-        added.append(slug)
-    changed = write_atomic(OUT / "models.json", catalog)
-    changed |= write_atomic(OUT / "codex_client_models.json", client)
+    return all_served, added
 
-    # Per-account exclusions for gpt-* slugs some account serves and this one does not.
-    for f, slugs in known.items():
-        want = sorted(s for s in all_served if s.startswith("gpt-") and s not in slugs)
+
+def claude_models(state):
+    """Never probe Claude; do not turn prose names or market guesses into ids."""
+    found = state.setdefault("claude_models", {})
+    if CLAUDE_CACHE.exists():
+        for m in json.loads(CLAUDE_CACHE.read_text()).get("models", []):
+            slug = m.get("slug", "")
+            if not m.get("isCustom") and slug.startswith("claude-") and family(slug)[0]:
+                found[slug] = m.get("name") or slug
+    for name in ("state.json", "search.json"):
+        path = ALERTS / name
+        if path.exists():
+            for alert in json.loads(path.read_text()).get("outbox", {}).values():
+                for slug in re.findall(r"\bclaude-[a-z0-9]+(?:-[a-z0-9]+)+\b", alert.get("text", "")):
+                    if family(slug)[0]:
+                        found.setdefault(slug, slug)
+    return found
+
+
+def add_claude(catalog, models):
+    entries = catalog.setdefault("claude", [])
+    official = list(entries)
+    added = []
+    for slug, name in sorted(models.items()):
+        if any(e["id"] == slug for e in entries):
+            continue
+        templates = [e for e in official if family(e["id"])[0] == family(slug)[0]]
+        if not templates:
+            log(f"warn: no Claude family template for {slug}; skipped")
+            continue
+        entry = copy.deepcopy(max(templates, key=lambda e: family(e["id"])[1]))
+        entry.update(id=slug, display_name=name)
+        entries.insert(0, entry)
+        added.append(slug)
+    return added
+
+
+def update_exclusions(served, all_served, state):
+    for f, slugs in served.items():
+        want = sorted(set(all_served) - set(slugs))
         ours = set(state["exclusions"].get(f.name, []))
         auth = json.loads(f.read_text())
         current = auth.get("excluded_models") or []
@@ -157,42 +228,52 @@ def main():
         new = manual + [x for x in want if x not in manual]
         if new != current:
             log(f"{f.name[:14]}…: excluded_models {current} -> {new}")
-            if not DRY:
-                auth = json.loads(f.read_text())  # reread right before writing
-                if new:
-                    auth["excluded_models"] = new
-                else:
-                    auth.pop("excluded_models", None)
-                write_atomic(f, auth)
+            if new:
+                auth["excluded_models"] = new
+            else:
+                auth.pop("excluded_models", None)
+            write_atomic(f, auth)
         state["exclusions"][f.name] = [x for x in want if x not in manual]
 
-    # Point the proxy at the local catalogs once.
-    text = CONFIG.read_text()
-    if f"catalog: {OUT}/models.json" not in text and not DRY:
-        block = f"models:\n  catalog: {OUT}/models.json\n  codex-catalog: {OUT}/codex_client_models.json\n"
-        if re.search(r"^models:", text, re.M):
-            log("config.yaml already has a models: block; add the two catalog paths by hand")
-        else:
-            CONFIG.write_text(block + text if not text.startswith("config-version") else
-                              text.replace("\n", "\n" + block, 1))
-            log("config.yaml now uses the local catalogs")
-            changed = True
 
-    if changed and not DRY:
-        req = urllib.request.Request(PROXY + "/v8/management/routing/model-definitions/refresh", data=b"{}",
-                                     method="POST", headers={"X-Management-Key": MGMT_KEY.read_text().strip(),
-                                                             "Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                log(f"proxy reload: {r.status}")
-        except Exception as e:
-            log(f"warn: proxy reload failed ({e}); it rereads within 3 h or on restart")
+def provider_refresh():
+    if not T3.exists():
+        return
+    try:
+        help_text = subprocess.run([str(T3), "provider", "--help"], capture_output=True, text=True, timeout=20)
+        if re.search(r"^\s+refresh(?:\s|$)", help_text.stdout, re.M):
+            result = subprocess.run([str(T3), "provider", "refresh"], capture_output=True, text=True, timeout=60)
+            log(f"t3 provider refresh: exit {result.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"warn: t3 provider refresh failed: {e}")
+
+
+def main():
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"exclusions": {}}
+    served = served_by_account(Path(config_value("auth-dir") or HOME / ".cli-proxy-api/auth").expanduser())
+    if not served or any(models is None for models in served.values()):
+        log("account discovery incomplete; catalogs and exclusions unchanged")
+        return 1
+    catalog = get(OFFICIAL + "models.json")
+    client = get(OFFICIAL + "codex_client_models.json")
+    all_served, codex_added = add_codex(catalog, client, served)
+    claude_added = add_claude(catalog, claude_models(state)) if CLAUDE_CONFIG.exists() else []
+    update_exclusions(served, all_served, state)
+    changed = publish(CONFIG, OUT, {"catalog": ("models", catalog), "codex-catalog": ("codex_client_models", client)})
+    if CLAUDE_CONFIG.exists():
+        changed |= publish(CLAUDE_CONFIG, CLAUDE_CONFIG.parent / "catalogs", {"catalog": ("models", catalog)})
     if not DRY:
         write_atomic(STATE, state)
-    log(f"added to catalog: {added or 'none'}; accounts: " +
-        ", ".join(f"{f.name[:14]}…={'ok' if s is not None else 'failed'}" for f, s in served.items()))
+        if changed:
+            provider_refresh()
+    log(f"added to catalog: Codex={codex_added or 'none'}; Claude={claude_added or 'none'}; accounts={len(served)}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if DRY:
+        sys.exit(main())
+    OUT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (OUT / ".lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        sys.exit(main())

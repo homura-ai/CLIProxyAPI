@@ -1,6 +1,6 @@
 [Unit]
-Description=Add Codex models the accounts serve but the CLIProxyAPI catalog lacks
-After=cliproxyapi.service
+Description=Add served Codex and locally discovered Claude models to CLIProxyAPI
+After=cliproxyapi.service cliproxyapi-claude.service
 
 [Service]
 Type=oneshot

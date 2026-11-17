@@ -24,11 +24,15 @@ If the rebase conflicts or the tests fail, the workflow opens an issue that reco
 
 The next hourly sync then releases the fix. The script starts one agent per failing head, never while another is still working, and at most 3 per issue. It keeps its state in `~/.local/state/cliproxyapi-rebase-agent/`.
 
-## New Codex models before upstream lists them (pbox)
+## New Codex and Claude models before upstream lists them (pbox)
 
-`pbox/cliproxyapi-codex-catalog` runs every 10 minutes from a user timer. It asks each Codex account which models it serves (the same `/codex/models` call Codex CLI makes) and writes `~/.cli-proxy-api/catalogs/models.json` and `codex_client_models.json`: the official catalogs plus any `gpt-*` slug an account serves that they lack. A new `models.json` entry is cloned from the newest entry of the same family (astra, sol, terra, luna); the Codex client entry is the backend's own. Once upstream lists a slug, the upstream entry is used.
+`pbox/cliproxyapi-codex-catalog` runs every 10 minutes from the existing user timer. It asks each Codex account which models it serves (the same `/codex/models` call Codex CLI makes). Every served slug is added to each plan catalog that lacks it, including slugs outside the `gpt-<version>-<family>` naming pattern. New entries clone the newest same-family entry when available, otherwise use the backend's name, context, modalities and reasoning levels. The Codex client catalog gets the backend's own entry independently. Official entries always win.
 
-It also sets `excluded_models` on each account file to the `gpt-*` slugs other accounts serve but that account does not, so a model still rolling out is never routed to an account without it. It removes only exclusions it added itself. On its first run it adds a `models:` block pointing `config.yaml` at the two local files, and it asks the proxy to reload them whenever they change.
+It sets per-account `excluded_models` for models still rolling out, removing only exclusions it owns. If any enabled account lookup fails, catalogs and exclusions stay unchanged until the next successful run.
+
+Claude has the same catalog routing gate (verified through `claude`: an unknown id returns `400 unknown provider for model`). Its ids come from `~/.t3/caches/claudeAgent.json`, populated by Claude Code, and explicit Claude ids in model-release-watch's local alert outbox. Prose release names are never converted into guessed ids. Observed ids are remembered in `state.json`; each new Claude entry clones the newest official entry of its family. Custom cache entries and families without templates are skipped. **The updater never makes HTTP requests to Anthropic or the Claude proxy, including management and model listing. Test Claude only with the `claude` CLI.**
+
+The updater alternates two local catalog files under each proxy's `catalogs/` directory and updates just the catalog paths in its config. Config hot reload makes changes effective without restarting either proxy or calling management endpoints. After a catalog change it runs `~/.t3/bin/t3 provider refresh` if `t3 provider --help` advertises `refresh`; older T3 versions are skipped quietly. `--dry-run` writes nothing and runs no refresh. Python 3, standard library only. Offline checks: `python3 pbox/test_codex_catalog.py`.
 
 To install it:
 
@@ -38,7 +42,7 @@ cp pbox/cliproxyapi-codex-catalog.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cliproxyapi-codex-catalog.timer
 ```
 
-To undo it, disable the timer, remove the `models:` block from `config.yaml`, and delete the `excluded_models` entries it added (listed in `~/.cli-proxy-api/catalogs/state.json`).
+To undo it, disable the timer, restore the pre-install configs for both proxies, and remove only the account exclusions recorded in `~/.cli-proxy-api/catalogs/state.json`. The pbox upgrade also saves a one-command rollback under `~/credentials/cliproxyapi/before-all-models-catalog-*/rollback`.
 
 ## pbox install
 
