@@ -144,6 +144,15 @@ class CatalogTests(unittest.TestCase):
         catalog.add_codex(general, client, {self.a: {self.other["slug"]: self.other}})
         self.assertEqual(client["models"][0]["description"], "official client")
 
+    def test_unserved_ids_are_removed_from_general_and_client_catalogs(self):
+        general = copy.deepcopy(self.official)
+        general["codex-pro"].append({"id": "gpt-6-chat-thinking"})
+        client = {"models": [{"slug": "gpt-6-chat-thinking"}]}
+        catalog.add_codex(general, client, {self.a: {self.new["slug"]: self.new}})
+        for ch in catalog.CODEX_CHANNELS:
+            self.assertEqual([e["id"] for e in general[ch]], [self.new["slug"]])
+        self.assertEqual(client["models"], [self.new])
+
     def test_path_changes_reload_each_changed_catalog_and_keep_two_slots(self):
         self.assertEqual(catalog.main(), 0)
         paths = (catalog.config_value("catalog"), catalog.config_value("codex-catalog"))
