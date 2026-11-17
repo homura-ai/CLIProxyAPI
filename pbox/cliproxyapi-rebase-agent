@@ -93,7 +93,7 @@ def main():
             print(f"#{n}: {MAX_LAUNCHES} agents already tried; leaving it for Homura")
             continue
         brief = BRIEF.format(repo=REPO, issue=n, title=issue["title"], head=head, project=PROJECT)
-        cmd = [T3, "thread", "start", "--json", "--provider", "codex", "--model", "gpt-6.1-sol",
+        cmd = [T3, "thread", "start", "--json", "--provider", "codex", "--model", "gpt-6.2-sol",
                "--option", "reasoningEffort=xhigh", "--title", f"CLIProxyAPI auto-rebase: #{n}",
                "--client-request-id", f"cpa-rebase-{n}-{head[:12]}", PROJECT, "-"]
         if DRY:
