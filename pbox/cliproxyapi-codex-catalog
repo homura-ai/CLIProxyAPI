@@ -1,0 +1,198 @@
+#!/usr/bin/python3 -I
+"""Keep CLIProxyAPI's Codex model catalogs in step with what the Codex accounts serve.
+
+Every run:
+1. Asks each Codex account in auth-dir which models it serves (chatgpt.com
+   backend-api/codex/models, the same call Codex CLI makes).
+2. Writes local copies of the official catalogs (models.json and
+   codex_client_models.json) plus every gpt-* slug an account serves that the
+   official catalog lacks. A models.json entry is cloned from the newest entry
+   of the same family (astra, sol, terra, luna) with id, name and context
+   taken from the backend; the Codex client entry is the backend's own.
+   Once the official catalog lists a slug, the official entry wins.
+3. Sets excluded_models on each account file to the gpt-* slugs other accounts
+   serve but this one does not (only exclusions this script added are ever
+   removed), so the proxy never routes a model to an account without it.
+4. Points config.yaml models.catalog / models.codex-catalog at the local files
+   (once) and asks the proxy to reload them when they change.
+"""
+import json, os, re, subprocess, sys, tempfile, urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("CPA_CONFIG", HOME / ".cli-proxy-api/config.yaml"))
+OUT = Path(os.environ.get("CPA_CATALOG_DIR", HOME / ".cli-proxy-api/catalogs"))
+STATE = OUT / "state.json"
+MGMT_KEY = HOME / "credentials/cliproxyapi/management-key"
+PROXY = os.environ.get("CPA_URL", "http://127.0.0.1:8317")
+OFFICIAL = "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/"
+CODEX_MODELS = "https://chatgpt.com/backend-api/codex/models?client_version="
+CODEX_CHANNELS = ("codex-free", "codex-plus", "codex-team", "codex-pro")
+DRY = "--dry-run" in sys.argv
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def get(url, headers=None, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "codex_cli_rs", **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def write_atomic(path, data, mode=0o600):
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    if path.exists() and path.read_text() == text:
+        return False
+    if DRY:
+        log(f"dry-run: would write {path}")
+        return True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+    return True
+
+
+def config_value(key):
+    m = re.search(rf"^\s*{re.escape(key)}:\s*\"?([^\"\n]+?)\"?\s*$", CONFIG.read_text(), re.M)
+    return m.group(1) if m else None
+
+
+def codex_version():
+    try:
+        out = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=20).stdout
+        return out.split()[-1]
+    except Exception:
+        return "0.169.0"
+
+
+def served_by_account(auth_dir):
+    """{auth file: {slug: backend entry}} for every enabled Codex account."""
+    version = codex_version()
+    result = {}
+    for f in sorted(auth_dir.glob("codex-*.json")):
+        try:
+            auth = json.loads(f.read_text())
+            if auth.get("disabled") or auth.get("type") != "codex":
+                continue
+            headers = {"Authorization": "Bearer " + auth["access_token"], "Originator": "codex_cli_rs",
+                       "Accept": "application/json"}
+            if auth.get("account_id"):
+                headers["Chatgpt-Account-Id"] = auth["account_id"]
+            models = get(CODEX_MODELS + version, headers)["models"]
+            result[f] = {m["slug"]: m for m in models if m.get("slug")}
+        except Exception as e:  # one account failing must not drop its models
+            log(f"warn: {f.name[:14]}…: {e}")
+            result[f] = None
+    return result
+
+
+def family(slug):
+    m = re.fullmatch(r"gpt-(\d+(?:\.\d+)?)-([a-z]+)", slug)
+    return (m.group(2), float(m.group(1))) if m else (None, 0)
+
+
+def catalog_entry(slug, backend, catalog):
+    fam, ver = family(slug)
+    templates = [(family(e["id"])[1], e) for ch in CODEX_CHANNELS for e in catalog.get(ch, [])
+                 if family(e["id"])[0] == fam and fam]
+    if not templates:
+        return None
+    entry = json.loads(json.dumps(max(templates, key=lambda t: t[0])[1]))
+    entry.update(id=slug, display_name=backend.get("display_name", slug).replace("-", " "),
+                 version=f"gpt-{ver}")
+    if backend.get("description"):
+        entry["description"] = backend["description"]
+    if backend.get("context_window"):
+        entry["context_length"] = backend["context_window"]
+    return entry
+
+
+def main():
+    auth_dir = Path(config_value("auth-dir") or HOME / ".cli-proxy-api/auth").expanduser()
+    state = json.loads(STATE.read_text()) if STATE.exists() else {"exclusions": {}}
+    served = served_by_account(auth_dir)
+    known = {f: s for f, s in served.items() if s is not None}
+    if not known:
+        log("no account answered; nothing changed")
+        return 1
+    all_served = {}
+    for s in known.values():
+        for slug, entry in s.items():
+            all_served.setdefault(slug, entry)
+
+    catalog = get(OFFICIAL + "models.json")
+    client = get(OFFICIAL + "codex_client_models.json")
+    in_catalog = {e["id"] for ch in CODEX_CHANNELS for e in catalog.get(ch, [])}
+    in_client = {m["slug"] for m in client["models"]}
+    added = []
+    for slug, backend in sorted(all_served.items()):
+        if not slug.startswith("gpt-") or slug in in_catalog:
+            continue
+        entry = catalog_entry(slug, backend, catalog)
+        if entry is None:
+            continue
+        for ch in CODEX_CHANNELS:
+            if ch in catalog:
+                catalog[ch].insert(0, dict(entry))
+        if slug not in in_client:
+            client["models"].insert(0, backend)
+        added.append(slug)
+    changed = write_atomic(OUT / "models.json", catalog)
+    changed |= write_atomic(OUT / "codex_client_models.json", client)
+
+    # Per-account exclusions for gpt-* slugs some account serves and this one does not.
+    for f, slugs in known.items():
+        want = sorted(s for s in all_served if s.startswith("gpt-") and s not in slugs)
+        ours = set(state["exclusions"].get(f.name, []))
+        auth = json.loads(f.read_text())
+        current = auth.get("excluded_models") or []
+        if isinstance(current, str):
+            current = [x for x in current.split(",") if x]
+        manual = [x for x in current if x not in ours]
+        new = manual + [x for x in want if x not in manual]
+        if new != current:
+            log(f"{f.name[:14]}…: excluded_models {current} -> {new}")
+            if not DRY:
+                auth = json.loads(f.read_text())  # reread right before writing
+                if new:
+                    auth["excluded_models"] = new
+                else:
+                    auth.pop("excluded_models", None)
+                write_atomic(f, auth)
+        state["exclusions"][f.name] = [x for x in want if x not in manual]
+
+    # Point the proxy at the local catalogs once.
+    text = CONFIG.read_text()
+    if f"catalog: {OUT}/models.json" not in text and not DRY:
+        block = f"models:\n  catalog: {OUT}/models.json\n  codex-catalog: {OUT}/codex_client_models.json\n"
+        if re.search(r"^models:", text, re.M):
+            log("config.yaml already has a models: block; add the two catalog paths by hand")
+        else:
+            CONFIG.write_text(block + text if not text.startswith("config-version") else
+                              text.replace("\n", "\n" + block, 1))
+            log("config.yaml now uses the local catalogs")
+            changed = True
+
+    if changed and not DRY:
+        req = urllib.request.Request(PROXY + "/v8/management/routing/model-definitions/refresh", data=b"{}",
+                                     method="POST", headers={"X-Management-Key": MGMT_KEY.read_text().strip(),
+                                                             "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                log(f"proxy reload: {r.status}")
+        except Exception as e:
+            log(f"warn: proxy reload failed ({e}); it rereads within 3 h or on restart")
+    if not DRY:
+        write_atomic(STATE, state)
+    log(f"added to catalog: {added or 'none'}; accounts: " +
+        ", ".join(f"{f.name[:14]}…={'ok' if s is not None else 'failed'}" for f, s in served.items()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
