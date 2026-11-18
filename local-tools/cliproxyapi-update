@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the newest patched CLIProxyAPI release from the fork on pbox.
+# Install the newest patched CLIProxyAPI release from the fork on the local machine.
 # Runs hourly from cliproxyapi-update.timer. Installs only when both proxies
 # have no open client connections, or when an update has waited over 24 hours.
 # After restarting both proxies it checks they are running and listening, and
@@ -73,7 +73,7 @@ else
   install -m 755 "$BIN.prev" "$BIN.new" && mv -f "$BIN.new" "$BIN" || log "restoring $BIN.prev failed"
   if systemctl --user restart "${UNITS[@]}" && healthy; then rb="rollback to $installed healthy"; else rb="rollback to $installed ALSO unhealthy"; fi
   log "$rb"
-  gh issue create --repo "$REPO" --title "pbox: $tag failed its health check" \
-    --body "pbox installed $tag, the proxies did not come back, and it rolled back ($rb). See \`journalctl --user -u cliproxyapi-update\` on pbox." || true
+  gh issue create --repo "$REPO" --title "Local install of $tag failed its health check" \
+    --body "After the updater installed $tag, the proxies did not come back. The updater rolled back ($rb). See \`journalctl --user -u cliproxyapi-update\` on the affected machine." || true
   exit 1
 fi

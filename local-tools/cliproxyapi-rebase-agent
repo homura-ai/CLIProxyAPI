@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start a T3 agent to fix the model-priority patch when the fork's sync fails.
 
-Runs hourly from cliproxyapi-rebase-agent.timer on pbox. For each open
+Runs hourly from the local cliproxyapi-rebase-agent.timer. For each open
 "sync-upstream failed for <tag>" issue on the fork, it reads the failing patch
 head that the workflow recorded (head=<sha>) and starts one agent per failing
 head, at most MAX_LAUNCHES per issue, and never while an earlier agent for that
@@ -10,20 +10,20 @@ issue is still running. Costs nothing when no issue is open.
 import json, os, re, subprocess, sys, pathlib
 
 REPO = os.environ.get("CPA_UPDATE_REPO", "homura-ai/CLIProxyAPI")
-PROJECT = os.environ.get("CPA_REBASE_PROJECT", "/home/vi/code/reuse/cliproxyapi")
-T3 = "/home/vi/.t3/bin/t3"
+PROJECT = os.environ.get("CPA_REBASE_PROJECT", str(pathlib.Path.home() / "code/reuse/cliproxyapi"))
+T3 = os.environ.get("T3CODE_CLI_PATH", str(pathlib.Path.home() / ".t3/bin/t3"))
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "cliproxyapi-rebase-agent"
 MAX_LAUNCHES = 3
 DRY = "--dry-run" in sys.argv
 
-BRIEF = """You are the CLIProxyAPI auto-rebase agent, started by the pbox timer cliproxyapi-rebase-agent.
+BRIEF = """You are the CLIProxyAPI auto-rebase agent, started by the local timer cliproxyapi-rebase-agent.
 
 Job: make the fork's sync succeed again. Issue: https://github.com/{repo}/issues/{issue} ("{title}"). Failing patch head: {head}.
 
 Background:
 - The fork {repo} keeps one commit on branch `model-priority` on top of the latest upstream router-for-me/CLIProxyAPI release.
 - That commit adds per-model credential priority (`model_priority` in auth files). See the README section it adds, and the commit itself (`git show model-priority`), for the intended behaviour.
-- The `automation` branch holds .github/workflows/sync-upstream.yml. Every hour it rebases the branch onto the latest release, tests it, and publishes a `v<upstream>-mp.<n>` release, which pbox installs automatically.
+- The `automation` branch holds .github/workflows/sync-upstream.yml. Every hour it rebases the branch onto the latest release, tests it, and publishes a `v<upstream>-mp.<n>` release, which the local updater installs automatically.
 - Its test gate fails only on repeatable failures that unmodified upstream does not also have.
 
 Steps:
@@ -40,7 +40,7 @@ Steps:
    - the tests for the touched packages
    - `go build ./cmd/server`
    - `go test ./...`
-   Compare any failure against an unmodified checkout of the same upstream tag. Delete the machine afterwards. Never run builds or tests on pbox.
+   Compare any failure against an unmodified checkout of the same upstream tag. Delete the machine afterwards. Run builds and tests on the cloud machine.
 4. Run the review-loop skill with a fresh Sol reviewer on the new commit, and get its approval.
 5. `git push --force-with-lease origin model-priority`. The next hourly sync run releases it.
 6. Comment on the issue with what changed and the new SHA, then close it. Every comment must start with:
@@ -90,7 +90,7 @@ def main():
             print(f"#{n}: an agent already handled head {head[:12]}")
             continue
         if len(launches) >= MAX_LAUNCHES:
-            print(f"#{n}: {MAX_LAUNCHES} agents already tried; leaving it for Homura")
+            print(f"#{n}: {MAX_LAUNCHES} agents already tried; leaving it for the maintainer")
             continue
         brief = BRIEF.format(repo=REPO, issue=n, title=issue["title"], head=head, project=PROJECT)
         cmd = [T3, "thread", "start", "--json", "--provider", "codex", "--model", "gpt-6.2-sol",

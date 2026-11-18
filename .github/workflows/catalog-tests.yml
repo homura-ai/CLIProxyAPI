@@ -1,13 +1,13 @@
 name: catalog-tests
 on:
   pull_request:
-    paths: ['pbox/*catalog*', '.github/workflows/catalog-tests.yml']
+    paths: ['local-tools/*catalog*', '.github/workflows/catalog-tests.yml']
   push:
     branches: [automation]
-    paths: ['pbox/*catalog*', '.github/workflows/catalog-tests.yml']
+    paths: ['local-tools/*catalog*', '.github/workflows/catalog-tests.yml']
 jobs:
   offline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: python3 pbox/test_codex_catalog.py
+      - run: python3 local-tools/test_codex_catalog.py

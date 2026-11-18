@@ -159,7 +159,7 @@ jobs:
           head='${{ steps.rebase.outputs.head }}'
           [[ '${{ steps.push.outcome }}' == 'success' ]] && head="$(git rev-parse HEAD)"
           if [[ '${{ steps.rebase.outputs.conflict }}' == 'true' ]]; then
-            why="The patch branch does not rebase cleanly onto ${latest}. The pbox auto-rebase agent picks this up; a fixed push to \`${PATCH_BRANCH}\` is released by the next hourly run."
+            why="The patch branch does not rebase cleanly onto ${latest}. The local auto-rebase agent picks this up; a fixed push to \`${PATCH_BRANCH}\` is released by the next hourly run."
           else
             why="Tests, build or release failed. See the run log."
           fi
