@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the newest patched CLIProxyAPI release from the fork on the local machine.
+# Install the newest patched CLIProxyAPI release from the fork on pbox.
 # Runs hourly from cliproxyapi-update.timer. Installs only when both proxies
 # have no open client connections, or when an update has waited over 24 hours.
 # After restarting both proxies it checks they are running and listening, and
