@@ -166,7 +166,7 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(len(list(self.out.glob("models*.json"))), 2)
         self.assertEqual(self.calls.read_text().count("refresh"), 3)
 
-    @unittest.skipUnless(sys.platform == "linux", "CLIProxyAPI uses inotify on pbox")
+    @unittest.skipUnless(sys.platform == "linux", "CLIProxyAPI uses Linux inotify")
     def test_config_write_preserves_inotify_watch(self):
         libc = ctypes.CDLL(None, use_errno=True)
         fd = libc.inotify_init1(os.O_NONBLOCK)

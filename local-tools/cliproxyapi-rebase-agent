@@ -10,8 +10,8 @@ issue is still running. Costs nothing when no issue is open.
 import json, os, re, subprocess, sys, pathlib
 
 REPO = os.environ.get("CPA_UPDATE_REPO", "homura-ai/CLIProxyAPI")
-PROJECT = os.environ.get("CPA_REBASE_PROJECT", "/home/vi/code/reuse/cliproxyapi")
-T3 = "/home/vi/.t3/bin/t3"
+PROJECT = os.environ.get("CPA_REBASE_PROJECT", str(pathlib.Path.home() / "code/reuse/cliproxyapi"))
+T3 = os.environ.get("T3CODE_CLI_PATH", str(pathlib.Path.home() / ".t3/bin/t3"))
 STATE = pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "cliproxyapi-rebase-agent"
 MAX_LAUNCHES = 3
 DRY = "--dry-run" in sys.argv
@@ -90,7 +90,7 @@ def main():
             print(f"#{n}: an agent already handled head {head[:12]}")
             continue
         if len(launches) >= MAX_LAUNCHES:
-            print(f"#{n}: {MAX_LAUNCHES} agents already tried; leaving it for Homura")
+            print(f"#{n}: {MAX_LAUNCHES} agents already tried; leaving it for the maintainer")
             continue
         brief = BRIEF.format(repo=REPO, issue=n, title=issue["title"], head=head, project=PROJECT)
         cmd = [T3, "thread", "start", "--json", "--provider", "codex", "--model", "gpt-6.2-sol",
