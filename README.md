@@ -7,22 +7,18 @@ This fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIPro
 `.github/workflows/sync-upstream.yml` runs every hour and stops early when nothing has changed. It does the following:
 
 1. Rebases `model-priority` onto the latest upstream release.
-2. Runs `go vet` and `go test ./...`.
+2. Refreshes the model catalogs, runs `go vet ./sdk/cliproxy/auth/...`, and runs `go test -count=1 -json ./...`. Test failures block release only if they repeat on the patch branch and are absent from the unmodified upstream release.
 3. Publishes a release tagged `v<upstream>-mp.<n>` with a linux-amd64 build and `checksums.txt`.
 
-If the rebase conflicts or the tests fail, the workflow opens an issue that records the failing patch head (`head=<sha>`), and publishes nothing.
+If the rebase conflicts or the validation gate fails, the workflow opens or updates an issue that records the failing patch head (`head=<sha>`), and publishes nothing. Build or release failures are also recorded in the issue.
 
 ## Auto-rebase agent (pbox)
 
-`pbox/cliproxyapi-rebase-agent` runs hourly at :45 from a user timer. For each open `sync-upstream failed for <tag>` issue, it starts a T3 agent (Sol, xhigh) in the `cliproxyapi` project. The agent:
-
-1. Rebases or fixes the patch.
-2. Validates it on boat.dev.
-3. Gets a fresh Sol review.
-4. Force-pushes `model-priority` and closes the issue.
-5. Verifies that the issue is closed, then settles its T3 thread. No-change resolutions also settle; blocked repairs stay unsettled.
-
-The next hourly sync then releases the fix. The script starts one agent per failing head, never while another is still working, and at most 3 per issue. It keeps its state in `~/.local/state/cliproxyapi-rebase-agent/`.
+`pbox/cliproxyapi-rebase-agent` runs hourly at :45 from a user timer. It starts a T3 agent in the
+`cliproxyapi` project to repair `model-priority` for open `sync-upstream failed for <tag>` issues.
+The next sync publishes a successful repair. The script starts at most one agent per failing head
+and three per issue, with one repair running at a time. State lives in
+`~/.local/state/cliproxyapi-rebase-agent/`.
 
 ## New Codex and Claude models before upstream lists them (pbox)
 
@@ -48,9 +44,10 @@ To undo it, disable the timer, restore the pre-install configs for both proxies,
 
 `pbox/cliproxyapi-update` runs hourly from a user timer. It installs the newest `-mp` release into `~/.cli-proxy-api/app/` only when both proxies (ports 8317 and 8318) have no open client connections, or after an update has waited 24 hours. It then restarts both proxies and checks that they are running and listening. If either check fails, it restores `cli-proxy-api.prev` and opens an issue. It never sends a request to either proxy.
 
-To install it:
+Install the updater and repair timers from this checkout.
 
-```
+```bash
+mkdir -p ~/.local/bin ~/.config/systemd/user
 install -m 755 pbox/cliproxyapi-update pbox/cliproxyapi-rebase-agent ~/.local/bin/
 cp pbox/cliproxyapi-update.{service,timer} pbox/cliproxyapi-rebase-agent.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now cliproxyapi-update.timer cliproxyapi-rebase-agent.timer
